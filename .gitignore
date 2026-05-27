@@ -12,12 +12,12 @@ venv/
 env/
 
 # SQLite database  (kept local; GH Actions uses the cache mechanism)
-*.db
+#*.db
 *.db-shm
 *.db-wal
 
 # Scan output  (uploaded as GH Actions artifact; not committed to history)
-output/*.json
+#output/*.json
 
 # Environment variable files
 .env
