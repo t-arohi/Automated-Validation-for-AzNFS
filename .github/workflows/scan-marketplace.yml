@@ -1,5 +1,8 @@
 name: Scan Marketplace Images
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 on:
   schedule:
     # Runs daily at 00:00 UTC
@@ -137,7 +140,7 @@ jobs:
       #      MAIL_RECIPIENT  — Destination address  (can be a comma-separated list)
       # ----------------------------------------------------------------
       - name: Send email notification
-        if: steps.count.outputs.new_count != '0'
+        if: steps.count.outputs.new_count != '0' && secrets.MAIL_SERVER != '' && secrets.MAIL_PORT != '' && secrets.MAIL_USERNAME != '' && secrets.MAIL_PASSWORD != '' && secrets.MAIL_RECIPIENT != ''
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.MAIL_SERVER }}
