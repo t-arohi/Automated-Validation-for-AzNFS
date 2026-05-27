@@ -25,6 +25,7 @@ Running locally
 import json
 import logging
 import os
+import re
 import sys
 
 import config
@@ -41,6 +42,62 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Derivations
+# ---------------------------------------------------------------------------
+
+def derive_family_and_distro_label(
+    publisher: str, offer: str, sku: str
+) -> tuple[str, str]:
+    """Derive package family and human-readable distro label from image metadata."""
+    p = (publisher or "").strip().lower()
+    o = (offer or "").strip().lower()
+    s = (sku or "").strip().lower()
+
+    # Ubuntu family
+    if p == "canonical" and "ubuntu" in o:
+        codename_to_version = {
+            "noble": "24.04",
+            "jammy": "22.04",
+            "focal": "20.04",
+            "bionic": "18.04",
+        }
+        for codename, version in codename_to_version.items():
+            if codename in o:
+                return "apt", f"Ubuntu {version}"
+
+        match = re.search(r"(\d{2})_(\d{2})", s)
+        if match:
+            return "apt", f"Ubuntu {match.group(1)}.{match.group(2)}"
+
+        return "apt", "Ubuntu"
+
+    # Debian family
+    if p == "debian" or "debian" in o:
+        match = re.search(r"debian-(\d+)", o) or re.search(r"^(\d+)", s)
+        if match:
+            return "apt", f"Debian {match.group(1)}"
+        return "apt", "Debian"
+
+    # Red Hat family
+    if p == "redhat" or o == "rhel" or "rhel" in o:
+        match = re.search(r"^(\d+)", s)
+        if match:
+            return "yum", f"RHEL {match.group(1)}"
+        return "yum", "RHEL"
+
+    # SUSE family
+    if p == "suse" or "sles" in o or "suse" in o or "opensuse" in o:
+        match = re.search(r"(?:sles[-_]?)(\d+)", o) or re.search(r"^(\d+)", s)
+        if match:
+            return "zypper", f"SLES {match.group(1)}"
+        if "opensuse" in o:
+            return "zypper", "openSUSE"
+        return "zypper", "SUSE Linux"
+
+    return "unknown", "Unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +159,13 @@ def main() -> int:
                                 version,
                                 region,
                             )
+                            family, distro_label = derive_family_and_distro_label(
+                                record.get("publisher", ""),
+                                record.get("image", ""),
+                                record.get("sku", ""),
+                            )
+                            record["family"] = family
+                            record["distro_label"] = distro_label
                             new_images.append(record)
 
     # ------------------------------------------------------------------
