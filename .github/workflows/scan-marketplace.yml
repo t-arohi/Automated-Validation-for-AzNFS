@@ -55,8 +55,8 @@ jobs:
       #    notifier.py uses the same MI to send the ACS email in-process,
       #    so no SMTP step is needed afterwards.
       #
-      #    Exit code 1 means "new images or version bumps found" — not
-      #    a failure. Anything > 1 is treated as a real failure.
+      #    Exit code 1 means "new distro release(s) found" — not a
+      #    failure. Anything > 1 is treated as a real failure.
       # ----------------------------------------------------------------
       - name: Run marketplace scan
         id: scan
@@ -86,30 +86,30 @@ jobs:
           python3 - <<'EOF'
           import json, os
           summary = os.environ["GITHUB_STEP_SUMMARY"]
-          path = "output/needs_validation.json"
+          path = "output/distros_to_validate.json"
           try:
-              images = json.load(open(path, encoding="utf-8"))
+              distros = json.load(open(path, encoding="utf-8"))
           except Exception:
-              images = []
+              distros = []
           with open(summary, "a", encoding="utf-8") as fh:
-              if not images:
-                  fh.write("## Marketplace scan: no new SKUs or version bumps.\n")
+              if not distros:
+                  fh.write("## Marketplace scan: no distro releases tracked yet.\n")
               else:
-                  fh.write(f"## {len(images)} marketplace SKU(s) need validation\n\n")
-                  fh.write("| Publisher | Family | Distro Label | SKU | Version | Region | Architecture | Date Found |\n")
-                  fh.write("|---|---|---|---|---|---|---|---|\n")
-                  for img in images:
+                  fh.write(f"## {len(distros)} distro release(s) tracked (cut-down list)\n\n")
+                  fh.write("_One row per OS release — SKU/version/region/architecture collapsed to counts._\n\n")
+                  fh.write("| Family | Distro Label | Publishers | Architectures | # SKUs |\n")
+                  fh.write("|---|---|---|---|---|\n")
+                  for d in distros:
+                      pubs = ", ".join(d.get("publishers", []))
+                      arch = ", ".join(d.get("architectures", []))
                       fh.write(
-                          f"| {img.get('publisher','')}"
-                          f" | {img.get('family','')}"
-                          f" | {img.get('distro_label','')}"
-                          f" | {img.get('sku','')}"
-                          f" | {img.get('version','')}"
-                          f" | {img.get('region','')}"
-                          f" | {img.get('architecture','')}"
-                          f" | {img.get('date_added','')} |\n"
+                          f"| {d.get('family','')}"
+                          f" | {d.get('distro_label','')}"
+                          f" | {pubs}"
+                          f" | {arch}"
+                          f" | {d.get('sku_count','')} |\n"
                       )
-                  fh.write("\n_Email notification was sent in-process by `notifier.py` via ACS + Managed Identity._\n")
+                  fh.write("\n_Email notification for **new** releases was sent in-process by `notifier.py` via ACS + Managed Identity._\n")
           EOF
 
       # ----------------------------------------------------------------
@@ -120,7 +120,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: marketplace-scan-${{ github.run_number }}
-          path: output/needs_validation.json
+          path: |
+            output/distros_to_validate.json
+            output/needs_validation.json
           retention-days: 30
           if-no-files-found: ignore
 

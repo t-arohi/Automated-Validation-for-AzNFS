@@ -200,3 +200,17 @@ def get_all_records(db_path: str) -> list[dict]:
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+def distinct_distro_labels(db_path: str) -> set[str]:
+    """Return the set of distro_label values currently tracked.
+
+    Used to diff at the distro-release level: snapshot before a scan, compare
+    after, and the difference is the set of brand-new OS releases to validate.
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute("SELECT DISTINCT distro_label FROM images").fetchall()
+        return {r["distro_label"] for r in rows}
+    finally:
+        conn.close()

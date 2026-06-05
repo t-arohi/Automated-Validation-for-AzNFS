@@ -213,6 +213,10 @@ def main() -> int:
     # ------------------------------------------------------------------
     # Step 3+4 — Scan and compare
     # ------------------------------------------------------------------
+    # Snapshot the distro releases already known, so that after the scan we can
+    # report only *new* OS releases (the cut-down list), not per-SKU churn.
+    known_distros_before = db_manager.distinct_distro_labels(config.DB_PATH)
+
     new_images: list[dict] = []
     updated_images: list[dict] = []
 
@@ -287,21 +291,29 @@ def main() -> int:
     )
 
     # ------------------------------------------------------------------
-    # Step 6 — Notify + exit code
+    # Step 6 — Notify + exit code  (distro-release granularity)
     # ------------------------------------------------------------------
-    if new_images or updated_images:
+    # The actionable signal is a NEW distro release, not a new SKU. A new SKU of
+    # an already-known release (e.g. another Ubuntu 22.04 variant) is not worth
+    # an alert — that release is already tracked/validated.
+    new_distros = [
+        d for d in distro_rollup if d["distro_label"] not in known_distros_before
+    ]
+
+    if new_distros:
         logger.info(
-            "Scan complete: %d new + %d updated SKU(s). Output: %s",
-            len(new_images), len(updated_images), config.OUTPUT_JSON,
+            "Scan complete: %d new distro release(s) to validate "
+            "(%d new + %d updated SKU row(s) underneath).",
+            len(new_distros), len(new_images), len(updated_images),
         )
-        notifier.send_phase1_summary(
-            new_images,
-            updated_images,
-            new_distro_rollup=rollup_by_distro(new_images),
-        )
+        notifier.send_phase1_summary(new_distros)
         return 1
 
-    logger.info("Scan complete: no new or updated SKUs.")
+    logger.info(
+        "Scan complete: no new distro releases "
+        "(%d new + %d updated SKU row(s), all within known releases).",
+        len(new_images), len(updated_images),
+    )
     return 0
 
 
