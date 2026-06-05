@@ -104,9 +104,15 @@ def derive_family_and_distro_label(
 
     # Red Hat family
     if p == "redhat" or o == "rhel" or "rhel" in o:
-        match = re.search(r"^(\d+)", s)
+        # SKUs encode the release as major[.minor] with assorted separators or
+        # none at all, e.g. 9-lvm-gen2 -> 9, 8_2 -> 8.2, 7.9 -> 7.9,
+        # 90-gen2 -> 9.0, 810 -> 8.10, 100 -> 10.0.
+        match = re.match(r"(10|\d)[._-]?(\d{1,2})?", s)
         if match:
-            return "yum", f"RHEL {match.group(1)}"
+            major, minor = match.group(1), match.group(2)
+            if minor:
+                return "yum", f"RHEL {major}.{minor}"
+            return "yum", f"RHEL {major}"
         return "yum", "RHEL"
 
     # SUSE family
@@ -118,7 +124,73 @@ def derive_family_and_distro_label(
             return "yum", "openSUSE"
         return "yum", "SUSE Linux"
 
+    # Azure Linux / CBL-Mariner family (Microsoft's own distro).
+    # Uses RPM + tdnf, so it shares the "yum" repo family for Phase 2.
+    if (
+        p == "microsoftcblmariner"
+        or "azure-linux" in o or "azurelinux" in o
+        or "cbl-mariner" in o or "mariner" in o
+    ):
+        match = re.search(r"azure-?linux-?(\d+)", o) or re.search(r"azure-?linux-?(\d+)", s)
+        if match:
+            return "yum", f"Azure Linux {match.group(1)}"
+        match = (
+            re.search(r"cbl-?mariner-?(\d+)", o)
+            or re.search(r"cbl-?mariner-?(\d+)", s)
+            or re.match(r"(\d+)", s)
+        )
+        if match:
+            return "yum", f"CBL-Mariner {match.group(1)}"
+        return "yum", "Azure Linux"
+
     return "unknown", "Unknown"
+
+
+def rollup_by_distro(images: list[dict]) -> list[dict]:
+    """Collapse SKU-level rows to the unit AzNFS actually validates: a distro release.
+
+    SKU, version, region, architecture and offer are *not* part of a distro's
+    identity — many marketplace offers/SKUs ship the same OS release — so they
+    are folded away here, leaving one entry per (family, distro_label).
+    Architecture and the contributing publishers/offers are kept as aggregated
+    details so no information is lost.
+    """
+    groups: dict[tuple[str, str], dict] = {}
+    for img in images:
+        key = (img.get("family", ""), img.get("distro_label", ""))
+        g = groups.get(key)
+        if g is None:
+            g = {
+                "family": key[0],
+                "distro_label": key[1],
+                "publishers": set(),
+                "architectures": set(),
+                "offers": set(),
+                "sku_count": 0,
+            }
+            groups[key] = g
+        if img.get("publisher"):
+            g["publishers"].add(img["publisher"])
+        if img.get("architecture"):
+            g["architectures"].add(img["architecture"])
+        if img.get("image"):
+            g["offers"].add(img["image"])
+        g["sku_count"] += 1
+
+    rollup = [
+        {
+            "family": g["family"],
+            "distro_label": g["distro_label"],
+            "publishers": sorted(g["publishers"]),
+            "architectures": sorted(g["architectures"]),
+            "offer_count": len(g["offers"]),
+            "sku_count": g["sku_count"],
+        }
+        for g in groups.values()
+    ]
+    rollup.sort(key=lambda r: (r["family"], r["distro_label"]))
+    return rollup
+
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +272,21 @@ def main() -> int:
         json.dump(new_images, fh, indent=2)
 
     # ------------------------------------------------------------------
+    # Step 5b — Distro-level rollup  (the unit AzNFS validates)
+    # ------------------------------------------------------------------
+    # The cut-down master list: every tracked SKU collapsed to its unique OS
+    # release. This is what Phase 2/3 consume — sku/version/region/arch/offer
+    # are not part of a distro's identity.
+    all_records = db_manager.get_all_records(config.DB_PATH)
+    distro_rollup = rollup_by_distro(all_records)
+    with open(config.OUTPUT_DISTROS, "w", encoding="utf-8") as fh:
+        json.dump(distro_rollup, fh, indent=2)
+    logger.info(
+        "Distro rollup: %d unique release(s) collapsed from %d SKU row(s) -> %s",
+        len(distro_rollup), len(all_records), config.OUTPUT_DISTROS,
+    )
+
+    # ------------------------------------------------------------------
     # Step 6 — Notify + exit code
     # ------------------------------------------------------------------
     if new_images or updated_images:
@@ -207,7 +294,11 @@ def main() -> int:
             "Scan complete: %d new + %d updated SKU(s). Output: %s",
             len(new_images), len(updated_images), config.OUTPUT_JSON,
         )
-        notifier.send_phase1_summary(new_images, updated_images)
+        notifier.send_phase1_summary(
+            new_images,
+            updated_images,
+            new_distro_rollup=rollup_by_distro(new_images),
+        )
         return 1
 
     logger.info("Scan complete: no new or updated SKUs.")

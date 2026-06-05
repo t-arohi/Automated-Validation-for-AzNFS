@@ -22,6 +22,8 @@ PUBLISHERS = [
     "RedHat",
     "SUSE",
     "Debian",
+    # Microsoft's own distro: Azure Linux 3.x and CBL-Mariner 1.x/2.x.
+    "MicrosoftCBLMariner",
 ]
 
 # ---------------------------------------------------------------------------
@@ -53,6 +55,10 @@ OUTPUT_DIR: str = os.environ.get(
 )
 
 OUTPUT_JSON: str = os.path.join(OUTPUT_DIR, "needs_validation.json")
+
+# Distro-level rollup: the de-duplicated list of OS releases AzNFS must validate,
+# collapsed from the per-SKU rows (sku/version/region/architecture/offer folded away).
+OUTPUT_DISTROS: str = os.path.join(OUTPUT_DIR, "distros_to_validate.json")
 
 # ---------------------------------------------------------------------------
 # Notifications  (Azure Communication Services Email)

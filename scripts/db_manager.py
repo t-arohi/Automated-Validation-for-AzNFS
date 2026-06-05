@@ -188,3 +188,15 @@ def get_image_record(
         return dict(row) if row else {}
     finally:
         conn.close()
+
+
+def get_all_records(db_path: str) -> list[dict]:
+    """Return every tracked image row as a list of dicts (for the distro rollup)."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM images ORDER BY publisher, distro_label, sku"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
