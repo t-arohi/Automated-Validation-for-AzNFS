@@ -318,4 +318,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        # Exit 2 (not 1) so the workflow can tell a real crash apart from the
+        # intentional "new distro release(s) found" signal (exit 1).
+        logger.exception("Scan failed with an unhandled error.")
+        sys.exit(2)

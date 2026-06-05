@@ -66,9 +66,12 @@ def initialize(db_path: str, schema_path: str) -> None:
 
     conn = _connect(db_path)
     try:
+        # Migrate any legacy table FIRST, so the schema's CREATE INDEX
+        # statements (e.g. idx_architecture) don't reference a column the old
+        # table is missing.
+        _lazy_migrate(conn)
         conn.executescript(schema_sql)
         conn.commit()
-        _lazy_migrate(conn)
         logger.info("Database ready at %s", db_path)
     finally:
         conn.close()

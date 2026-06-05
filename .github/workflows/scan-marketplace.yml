@@ -33,9 +33,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: marketplace.db
-          key: marketplace-db-${{ github.run_id }}
+          key: marketplace-db-v2-${{ github.run_id }}
           restore-keys: |
-            marketplace-db-
+            marketplace-db-v2-
 
       # ----------------------------------------------------------------
       # 3. Python setup and dependency install
@@ -134,4 +134,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: marketplace.db
-          key: marketplace-db-${{ github.run_id }}
+          key: marketplace-db-v2-${{ github.run_id }}
