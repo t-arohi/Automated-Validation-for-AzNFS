@@ -5,8 +5,15 @@ env:
 
 on:
   schedule:
-    # Daily at 00:00 UTC
-    - cron: "0 0 * * *"
+    # Daily at 07:23 UTC.
+    #
+    # NOTE: deliberately NOT on the hour and NOT at midnight. GitHub's
+    # `schedule` trigger is best-effort: at high-load times (every :00, and
+    # 00:00 UTC most of all) queued cron runs are frequently delayed by many
+    # minutes or dropped entirely. Picking an off-peak hour and an odd minute
+    # makes the daily run fire reliably. If you need it at a different time,
+    # keep the minute non-zero and avoid the top of popular hours.
+    - cron: "23 7 * * *"
   workflow_dispatch:
     # Manual trigger from the GitHub Actions UI
 
