@@ -5,7 +5,7 @@ env:
 
 on:
   schedule:
-    # Daily at 01:23 UTC == 06:53 IST (before 08:00 IST).
+    # Daily at 01:23 UTC.
     #
     # NOTE: deliberately NOT on the hour and NOT at midnight. GitHub's
     # `schedule` trigger is best-effort: at high-load times (every :00, and
