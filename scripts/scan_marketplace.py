@@ -281,13 +281,24 @@ def main() -> int:
     # The cut-down master list: every tracked SKU collapsed to its unique OS
     # release. This is what Phase 2/3 consume — sku/version/region/arch/offer
     # are not part of a distro's identity.
+    #
+    # Only releases still awaiting validation belong in "distros to validate":
+    # a SKU is inserted as validated='unknown' and stays here until Phase 2/3
+    # marks it known_supported / known_unsupported, at which point its release
+    # drops out of the file. A release is listed while ANY of its SKUs is still
+    # unknown.
     all_records = db_manager.get_all_records(config.DB_PATH)
-    distro_rollup = rollup_by_distro(all_records)
+    unvalidated_records = [
+        r for r in all_records if r.get("validated") == "unknown"
+    ]
+    distro_rollup = rollup_by_distro(unvalidated_records)
     with open(config.OUTPUT_DISTROS, "w", encoding="utf-8") as fh:
         json.dump(distro_rollup, fh, indent=2)
     logger.info(
-        "Distro rollup: %d unique release(s) collapsed from %d SKU row(s) -> %s",
-        len(distro_rollup), len(all_records), config.OUTPUT_DISTROS,
+        "Distros to validate: %d unvalidated release(s) collapsed from "
+        "%d unvalidated SKU row(s) (of %d tracked) -> %s",
+        len(distro_rollup), len(unvalidated_records), len(all_records),
+        config.OUTPUT_DISTROS,
     )
 
     # ------------------------------------------------------------------
