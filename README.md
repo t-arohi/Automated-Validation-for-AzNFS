@@ -25,7 +25,7 @@ python scripts/scan_marketplace.py
         ├── SQLite (marketplace.db, cached between runs)
         │       └── classify each SKU: NEW / UPDATED / UNCHANGED
         │
-        └── output/needs_validation.json    (artifact, audit trail)
+        └── output/distros_to_validate.json    (artifact, audit trail)
 ```
 
 Key properties:
@@ -93,7 +93,7 @@ are silently re-stamped.
 
 ## Output
 
-`output/needs_validation.json` is **overwritten** every run with the list of
+`output/distros_to_validate.json` is **overwritten** every run with the list of
 NEW + UPDATED images from that scan. Schema per entry:
 
 ```json
