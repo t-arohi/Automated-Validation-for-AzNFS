@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily 01:23 UTC trigger for the "Scan Marketplace Images" workflow
+Documentation=https://github.com/t-arohi/marketplace-distro-scanner
+
+[Timer]
+# Mirrors the GitHub cron (23 1 * * *). The VM clock fires this reliably; GitHub's
+# hosted scheduler does not.
+OnCalendar=*-*-* 01:23:00 UTC
+# If the VM was off/asleep at 01:23, run as soon as it is back up.
+Persistent=true
+Unit=aznfs-scan-trigger.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,18 @@
+[Unit]
+Description=Trigger the "Scan Marketplace Images" GitHub Actions workflow on the self-hosted Azure VM runner
+Documentation=https://github.com/t-arohi/marketplace-distro-scanner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=azureuser
+Group=azureuser
+# gh reads its credentials from $HOME/.config/gh; point HOME at the runner user.
+Environment=HOME=/home/azureuser
+# Dispatch via workflow_dispatch so the self-hosted runner on THIS VM executes the
+# job. The whole GHA pipeline (checkout, DB cache, artifact, step summary, ACS
+# email) is preserved -- only the *trigger* comes from this VM's clock instead of
+# GitHub's best-effort hosted cron (observed firing 9-13 h late, or not at all).
+# Retry a few times to ride out transient network/API hiccups at trigger time.
+ExecStart=/usr/bin/bash -c 'for i in 1 2 3; do /usr/bin/gh workflow run scan-marketplace.yml --ref master -R t-arohi/marketplace-distro-scanner && exit 0; echo "gh dispatch attempt $i failed; retrying in 30s" >&2; sleep 30; done; exit 1'
