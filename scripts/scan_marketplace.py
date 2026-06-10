@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime, timezone
 
 import config
 import azure_client
@@ -192,6 +193,48 @@ def rollup_by_distro(images: list[dict]) -> list[dict]:
     return rollup
 
 
+def buckets_by_family(records: list[dict]) -> dict[str, list[dict]]:
+    """Group tracked images into per-family buckets for the monthly reminder.
+
+    For each (family, distro_label) the latest version observed is kept, with the
+    contributing publishers and the number of SKUs. Returns {family: [distro,...]}.
+    """
+    groups: dict[tuple[str, str], dict] = {}
+    for img in records:
+        family = img.get("family", "") or "unknown"
+        key = (family, img.get("distro_label", ""))
+        g = groups.get(key)
+        if g is None:
+            g = {
+                "family": family,
+                "distro_label": key[1],
+                "version": img.get("version", ""),
+                "publishers": set(),
+                "sku_count": 0,
+            }
+            groups[key] = g
+        if img.get("publisher"):
+            g["publishers"].add(img["publisher"])
+        # Marketplace versions sort lexicographically (zero-padded date-style).
+        if img.get("version", "") > g["version"]:
+            g["version"] = img["version"]
+        g["sku_count"] += 1
+
+    buckets: dict[str, list[dict]] = {}
+    for g in groups.values():
+        buckets.setdefault(g["family"], []).append(
+            {
+                "distro_label": g["distro_label"],
+                "version": g["version"],
+                "publishers": sorted(g["publishers"]),
+                "sku_count": g["sku_count"],
+            }
+        )
+    for fam in buckets:
+        buckets[fam].sort(key=lambda d: d["distro_label"])
+    return buckets
+
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -325,7 +368,17 @@ def main() -> int:
         "(%d new + %d updated SKU row(s), all within known releases).",
         len(new_images), len(updated_images),
     )
-    notifier.send_phase1_no_new_releases(len(new_images), len(updated_images))
+
+    # Monthly reminder: at most once per calendar month (UTC), on the first scan
+    # of the month, email a snapshot of every tracked distro grouped by package
+    # family. Daily "nothing new" runs otherwise stay silent.
+    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    if db_manager.get_meta(config.DB_PATH, "last_monthly_reminder") != current_month:
+        buckets = buckets_by_family(all_records)
+        if buckets:
+            notifier.send_monthly_reminder(buckets)
+            db_manager.set_meta(config.DB_PATH, "last_monthly_reminder", current_month)
+            logger.info("Monthly reminder sent for %s.", current_month)
     return 0
 
 

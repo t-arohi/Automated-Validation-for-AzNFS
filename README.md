@@ -118,21 +118,22 @@ table.
 ## Email
 
 Sent via Azure Communication Services Email REST API using the VM's
-Managed Identity — no SMTP, no passwords. Two HTML sections, each a 9-column
-table:
+Managed Identity — no SMTP, no passwords.
 
-1. **New SKUs** — first-time discoveries.
-2. **Version bumps** — existing SKUs that got a newer version.
+When a scan finds **new distro releases**, an email lists them (one row per OS
+release, with publishers / architectures / SKU counts collapsed). Example
+subject:
 
-Subject line examples:
+- `[AzFilesAutoPackager] 3 new distro release(s) need validation`
 
-- `[AzNFS Phase 1] 3 new marketplace SKU(s)`
-- `[AzNFS Phase 1] 2 version bump marketplace SKU(s)`
-- `[AzNFS Phase 1] 3 new + 2 version bumps marketplace SKU(s)`
+If no new distro releases are found, **no email is sent that day**. Once per
+calendar month — on the first scan of the month with nothing new — a reminder
+lists every tracked distro release grouped by package family (`apt` / `yum`), so
+the team gets a periodic snapshot without daily noise:
 
-If both lists are empty a short "no new distro releases" heartbeat email is sent
-instead, so a successful run is always confirmed. Notification failures are
-caught and logged — they never crash the scan.
+- `[AzFilesAutoPackager] Monthly reminder: 12 distro release(s) tracked`
+
+Notification failures are caught and logged — they never crash the scan.
 
 ## Exit codes
 

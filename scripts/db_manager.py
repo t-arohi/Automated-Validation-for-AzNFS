@@ -217,3 +217,29 @@ def distinct_distro_labels(db_path: str) -> set[str]:
         return {r["distro_label"] for r in rows}
     finally:
         conn.close()
+
+
+def get_meta(db_path: str, key: str) -> str | None:
+    """Return a value from the meta key/value table, or None if the key is absent."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+    finally:
+        conn.close()
+
+
+def set_meta(db_path: str, key: str, value: str) -> None:
+    """Insert or update a value in the meta key/value table."""
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        conn.commit()
+    finally:
+        conn.close()

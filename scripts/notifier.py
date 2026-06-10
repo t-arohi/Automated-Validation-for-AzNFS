@@ -79,7 +79,7 @@ def send_phase1_summary(
         return
 
     n = len(new_distros)
-    subject = f"[AzNFS Phase 1] {n} new distro release(s) need validation"
+    subject = f"[AzFilesAutoPackager] {n} new distro release(s) need validation"
 
     plain = (
         f"{n} new distro release(s) need AzNFS validation "
@@ -100,42 +100,101 @@ def send_phase1_summary(
     _send(subject, plain, html_body, recipients)
 
 
-def send_phase1_no_new_releases(
-    new_sku_count: int = 0,
-    updated_sku_count: int = 0,
+# Family display order + titles for the monthly reminder.
+_FAMILY_ORDER = ["apt", "yum"]
+_FAMILY_TITLES = {
+    "apt": "apt — Debian / Ubuntu family",
+    "yum": "yum — RHEL / SUSE / Azure Linux family",
+}
+
+
+def _ordered_families(buckets: dict[str, list[dict]]) -> list[str]:
+    known = [f for f in _FAMILY_ORDER if f in buckets]
+    rest = sorted(f for f in buckets if f not in _FAMILY_ORDER)
+    return known + rest
+
+
+def _reminder_table_html(distros: list[dict]) -> str:
+    cols = [
+        ("distro_label", "Distro"),
+        ("version", "Latest version"),
+        ("publishers", "Publishers"),
+        ("sku_count", "# SKUs"),
+    ]
+    head = "".join(
+        f"<th style='text-align:left;padding:4px 8px;background:#f3f3f3'>{lbl}</th>"
+        for _, lbl in cols
+    )
+    body = ""
+    for d in distros:
+        cells = "".join(
+            f"<td style='padding:4px 8px;border-top:1px solid #ddd'>"
+            f"{html.escape(_fmt(d.get(key, '')))}</td>"
+            for key, _ in cols
+        )
+        body += f"<tr>{cells}</tr>"
+    return (
+        "<table style='border-collapse:collapse;font-family:Segoe UI,sans-serif;"
+        f"font-size:13px'><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+    )
+
+
+def send_monthly_reminder(
+    buckets: dict[str, list[dict]],
     recipients: Iterable[str] | None = None,
 ) -> None:
-    """Phase 1 heartbeat: confirm the scan ran and found no new distro releases.
+    """Monthly reminder: every tracked distro release, grouped by package family.
 
-    Sent on a clean scan so the team gets positive confirmation that the nightly
-    run executed, instead of silence. Any new/updated SKU churn that stayed
-    within already-known releases is noted for context — it needs no validation.
+    Sent at most once per calendar month (on the first scan of the month with no
+    new releases), so the daily "nothing new" runs stay silent while the team
+    still gets a periodic snapshot of everything being tracked.
     """
     recipients = list(recipients or config.NOTIFY_RECIPIENTS)
     if not recipients:
         logger.warning("No recipients configured — skipping notification.")
         return
 
-    subject = "[AzNFS Phase 1] No new distro releases to validate"
+    families = _ordered_families(buckets)
+    total_distros = sum(len(buckets[f]) for f in families)
+    total_skus = sum(d.get("sku_count", 0) for f in families for d in buckets[f])
 
-    churn = ""
-    if new_sku_count or updated_sku_count:
-        churn = (
-            f" {new_sku_count} new and {updated_sku_count} updated SKU row(s) were "
-            f"seen, but all fall within already-known releases."
-        )
-
-    plain = (
-        "Marketplace scan completed successfully.\n\n"
-        f"No new distro releases need AzNFS validation.{churn}"
+    subject = (
+        f"[AzFilesAutoPackager] Monthly reminder: {total_distros} distro release(s) tracked"
     )
 
+    plain_parts = [
+        f"Monthly snapshot of all distro releases tracked by AzFilesAutoPackager "
+        f"({total_distros} release(s) across {total_skus} SKU(s)):",
+        "",
+    ]
+    for fam in families:
+        plain_parts.append(f"[{fam}]")
+        for d in buckets[fam]:
+            plain_parts.append(
+                f"  - {d.get('distro_label')} "
+                f"(latest {d.get('version')}; {_fmt(d.get('publishers', []))}; "
+                f"{d.get('sku_count')} SKU(s))"
+            )
+        plain_parts.append("")
+    plain = "\n".join(plain_parts)
+
+    sections = ""
+    for fam in families:
+        title = _FAMILY_TITLES.get(fam, fam)
+        sections += (
+            f"<h4 style='font-family:Segoe UI,sans-serif;margin:12px 0 4px'>"
+            f"{html.escape(title)} "
+            f"<span style='color:#888;font-weight:normal'>({len(buckets[fam])})</span></h4>"
+            f"{_reminder_table_html(buckets[fam])}"
+        )
     html_body = (
-        "<h3 style='font-family:Segoe UI,sans-serif'>No new distro releases</h3>"
-        "<p style='font-family:Segoe UI,sans-serif;color:#555'>"
-        "The marketplace scan completed successfully and found "
-        "<strong>no new distro releases</strong> to validate."
-        f"{html.escape(churn)}</p>"
+        f"<h3 style='font-family:Segoe UI,sans-serif'>Monthly distro tracking reminder "
+        f"<span style='color:#888;font-weight:normal'>({total_distros})</span></h3>"
+        f"<p style='font-family:Segoe UI,sans-serif;color:#555'>"
+        f"All distro releases currently tracked by AzFilesAutoPackager, grouped by "
+        f"package family. This is a once-a-month snapshot — daily scans with nothing "
+        f"new stay silent.</p>"
+        f"{sections}"
     )
 
     _send(subject, plain, html_body, recipients)

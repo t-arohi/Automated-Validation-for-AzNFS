@@ -33,3 +33,11 @@ CREATE INDEX IF NOT EXISTS idx_region       ON images(region);
 CREATE INDEX IF NOT EXISTS idx_publisher    ON images(publisher);
 CREATE INDEX IF NOT EXISTS idx_architecture ON images(architecture);
 CREATE INDEX IF NOT EXISTS idx_family       ON images(family);
+
+-- Scanner metadata as simple key/value rows (e.g. the calendar month the
+-- monthly reminder email was last sent, so daily "nothing new" runs stay
+-- silent but a once-a-month snapshot still goes out).
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
