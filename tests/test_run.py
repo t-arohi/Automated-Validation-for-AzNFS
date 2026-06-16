@@ -39,8 +39,8 @@ class FakeDbMod:
         self.calls = []
         self.matched = matched
 
-    def set_validation_state(self, db_path, identity, state, reason=None):
-        self.calls.append((db_path, identity, state, reason))
+    def set_validation_state(self, db_path, identity, state):
+        self.calls.append((db_path, identity, state))
         return self.matched
 
 
@@ -82,7 +82,8 @@ def test_db_adapter_forwards_path_identity_state_reason():
 
     ad.set_validation_state(ident, "known_supported", None, "2026-01-01T00:00:00Z")
 
-    assert mod.calls == [("/tmp/marketplace.db", ident, "known_supported", None)]
+    # The reason is e-mailed, not persisted: the DB layer receives only the state.
+    assert mod.calls == [("/tmp/marketplace.db", ident, "known_supported")]
 
 
 def test_db_adapter_warns_when_no_row(caplog):

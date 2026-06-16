@@ -24,11 +24,7 @@ CREATE TABLE IF NOT EXISTS images (
     validated     TEXT    NOT NULL DEFAULT 'unknown',
                                       -- unknown           : not yet handed to Phase 2/3
                                       -- known_supported   : passed Phase 3 LISA test cases
-                                      -- known_unsupported : failed at some phase (see `reason`)
-    reason        TEXT    DEFAULT NULL,
-                                      -- Phase 2: why a distro was marked
-                                      -- known_unsupported (which gate failed +
-                                      -- the precise human-actionable detail).
+                                      -- known_unsupported : failed at some phase (reason e-mailed)
     UNIQUE(publisher, image, sku, region, architecture)
 );
 

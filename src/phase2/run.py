@@ -111,7 +111,9 @@ class Phase1DbAdapter:
         self._path = db_path
 
     def set_validation_state(self, identity, validated, reason, date_added) -> None:  # noqa: ARG002
-        updated = self._db.set_validation_state(self._path, identity, validated, reason)
+        # The reason is delivered by e-mail (via the notifier), not persisted in
+        # the DB, so it is intentionally not forwarded here.
+        updated = self._db.set_validation_state(self._path, identity, validated)
         if not updated:
             logger.warning("No DB row matched identity %s (state=%s)", identity, validated)
 

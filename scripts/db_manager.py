@@ -50,8 +50,6 @@ def _lazy_migrate(conn: sqlite3.Connection) -> None:
         adds.append("ALTER TABLE images ADD COLUMN family TEXT NOT NULL DEFAULT 'unknown'")
     if "distro_label" not in cols:
         adds.append("ALTER TABLE images ADD COLUMN distro_label TEXT NOT NULL DEFAULT ''")
-    if "reason" not in cols:
-        adds.append("ALTER TABLE images ADD COLUMN reason TEXT DEFAULT NULL")
     if adds:
         logger.warning(
             "Legacy schema detected — adding new columns. "
@@ -205,16 +203,15 @@ def set_validation_state(
     db_path: str,
     identity: tuple[str, str, str, str, str],
     state: str,
-    reason: str | None = None,
 ) -> bool:
     """Phase 2: update the validation verdict for one image row.
 
     identity is the full row identity tuple
     (publisher, image, sku, region, architecture) — the same key used by
     check_and_upsert / get_image_record. ``state`` must be one of
-    'known_supported', 'known_unsupported', 'unknown'. ``reason`` is the
-    human-actionable explanation stored alongside known_unsupported (cleared
-    when re-marking supported). All other Phase 1 columns are preserved.
+    'known_supported', 'known_unsupported', 'unknown'. The human-actionable
+    reason for a known_unsupported verdict is delivered by e-mail, not stored
+    here. All other Phase 1 columns are preserved.
 
     Returns True if a row was updated, False if no matching row exists.
     """
@@ -230,7 +227,6 @@ def set_validation_state(
             """
             UPDATE images
                SET validated    = ?,
-                   reason       = ?,
                    last_checked = ?
              WHERE publisher    = ?
                AND image        = ?
@@ -238,7 +234,7 @@ def set_validation_state(
                AND region       = ?
                AND architecture = ?
             """,
-            (state, reason, now, publisher, image, sku, region, architecture),
+            (state, now, publisher, image, sku, region, architecture),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -248,9 +244,8 @@ def set_validation_state(
             )
             return False
         logger.info(
-            "Validation state: %s / %s / %s [%s, %s] -> %s%s",
+            "Validation state: %s / %s / %s [%s, %s] -> %s",
             publisher, image, sku, region, architecture, state,
-            f" ({reason})" if reason else "",
         )
         return True
     finally:
