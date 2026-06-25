@@ -15,8 +15,8 @@ See [`../docs/PHASE3.md`](../docs/PHASE3.md) for the full test plan.
 | `testsuites/__init__.py` | Package marker |
 | `runbooks/aznfs_validation.yml` | LISA runbook (platform + `aznfs_*` inputs) |
 | `runbooks/aznfs_multidistro.yml` | Multi-distro `batch` runbook (one parallel run, many distros) |
-| `orchestrator/` | Post-validation PMC prod check (gates + DB update + notify) |
-| `run_phase3.py` | **Automation driver**: jobs.json → LISA → orchestrator |
+| `orchestrator/` | Records the verdict in the DB + sends one summary e-mail (not a LISA test) |
+| `run_phase3.py` | **Automation driver**: lisa_jobs.json → LISA → record_result |
 | `AUTOMATION.md` | How Phase 3 runs end-to-end with no human in the loop |
 | `examples/jobs.example.json` | Sample Phase 2 input for the driver |
 
@@ -65,7 +65,7 @@ fully automated driver.
 - AzNFS names/paths (`aznfs`, `aznfswatchdog`, `mount.aznfs`) and the exact
   mount/EIT options are **runbook variables**, not hardcoded — confirm with the
   team and override via `-v` without editing code.
-- Install is **tux-dev URL first**, **PMC repo fallback**. Tier 1 artifact
+- Install is **prod URL first**, **PMC repo fallback**. Tier 1 artifact
   checks only run when a package URL is provided (you can only inspect a file
   you downloaded).
 - Non-RPM/DEB distros are **skipped**, not failed.

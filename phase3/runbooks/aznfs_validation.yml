@@ -75,7 +75,7 @@ variable:
     value: "verify_aznfs.*"
 
   # --- AzNFS package validation inputs (read by the test suite) ---
-  # Primary install source: the tux-dev download URL Phase 2 produces. If empty,
+  # Primary install source: the PMC prod download URL Phase 2 produces. If empty,
   # the suite falls back to the PMC repo defined by aznfs_pmc_repo.
   - name: aznfs_package_url
     value: ""

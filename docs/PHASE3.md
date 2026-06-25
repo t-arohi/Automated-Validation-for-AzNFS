@@ -1,9 +1,9 @@
 # Phase 3: AzNFS Package Validation (LISA)
 
 Phase 3 is the **validation** stage of the marketplace-distro pipeline. After
-Phase 1 discovers a new distro image and Phase 2 publishes the Azure Files
-package (AzNFS) to PMC tux-dev, Phase 3 uses **LISA** to provision a VM of that
-distro, install the package, and assert it works — producing a pass/fail
+Phase 1 discovers a new distro image and Phase 2 confirms the Azure Files package
+(AzNFS) is published on PMC **prod**, Phase 3 uses **LISA** to provision a VM of
+that distro, install the package, and assert it works — producing a pass/fail
 "distro readiness" signal.
 
 > The test code lives in **this repo** under [`../phase3/`](../phase3) (test
@@ -17,12 +17,13 @@ distro, install the package, and assert it works — producing a pass/fail
 | Phase | Output | Responsibility |
 |-------|--------|----------------|
 | Phase 1 | `output/needs_validation.json` | Scan marketplace, diff against SQLite |
-| Phase 2 | `lisa_jobs.json` (distro + tux-dev URL + version) | Publish package to PMC tux-dev |
-| **Phase 3** | **Pass/fail per distro** | **Provision VM, install, validate, report** |
+| Phase 2 | `lisa_jobs.json` (distro + prod package URL + version) | Confirm the package is published on PMC prod |
+| **Phase 3** | **Pass/fail per distro** | **Provision VM, install, validate, record** |
 
 A LISA pass marks the distro `known_supported`; a failure marks it
 `known_unsupported`. Skips (e.g. wrong package family) are recorded separately
-and do not count as failures.
+and do not count as failures. Phase 3 is **LISA testing only** — it does not
+query PMC prod (Phase 2 already owns that check).
 
 ## What is under test
 
@@ -120,7 +121,7 @@ hardcoded in the test code.
 
 | Variable | Meaning |
 |----------|---------|
-| `aznfs_package_url` | tux-dev download URL for the exact package |
+| `aznfs_package_url` | PMC prod download URL for the exact package (supplied by Phase 2) |
 | `aznfs_pmc_repo` | PMC repo (fallback install path if no URL) |
 | `aznfs_expected_version` | version to assert, e.g. `0.3.2` |
 | `aznfs_mount_type` / `aznfs_mount_opts` | AzNFS mount type + NFSv4.1 options |
@@ -136,16 +137,21 @@ marketplace-distro-scanner/
 ├── docs/PHASE3.md                       # this document
 └── phase3/
     ├── README.md                        # short placement/run guide
+    ├── AUTOMATION.md                     # the end-to-end automated run
+    ├── run_phase3.py                     # automation driver (LISA per distro -> verdict)
     ├── testsuites/
     │   ├── __init__.py
     │   └── aznfs_validation.py           # the LISA test suite (3 cases / 5 tiers)
     ├── runbooks/
-    │   └── aznfs_validation.yml          # LISA runbook (platform + aznfs_* inputs)
-    └── orchestrator/                     # post-validation PMC prod check (not a LISA test)
+    │   ├── aznfs_validation.yml          # LISA runbook (platform + aznfs_* inputs)
+    │   └── aznfs_multidistro.yml         # batch combinator for many distros at once
+    ├── examples/
+    │   └── jobs.example.json             # sample Phase 2 hand-off
+    └── orchestrator/                     # record the verdict (NOT a LISA test)
         ├── __init__.py
         ├── config.py
-        ├── pmc_prod_check.py
-        └── schema_phase3.sql             # adds last_validated + pmc_prod_state columns
+        ├── record_result.py              # DB update + one summary e-mail
+        └── schema_phase3.sql             # adds the last_validated column
 ```
 
 ## Setup and run (local dev, WSL)
@@ -245,8 +251,8 @@ combinator:
       aznfs_package_url: "https://packages.microsoft.com/rhel/9.0/prod/Packages/a/aznfs-0.3.458-1.x86_64.rpm"
       aznfs_expected_version: "0.3.458"
     - marketplace_image: "canonical 0001-com-ubuntu-server-jammy 22_04-lts latest"
-      aznfs_package_url: "https://packages.microsoft.com/ubuntu/22.04/prod/pool/main/a/aznfs/aznfs_3.0.18_amd64.deb"
-      aznfs_expected_version: "3.0.18"
+      aznfs_package_url: "https://packages.microsoft.com/ubuntu/22.04/prod/pool/main/a/aznfs/aznfs_0.3.458_amd64.deb"
+      aznfs_expected_version: "0.3.458"
 ```
 
 ```bash
@@ -256,12 +262,11 @@ lisa run -r .../phase3/runbooks/aznfs_multidistro.yml \
   -v subscription_id:<sub> -v concurrency:6 -v keep_environment:no
 ```
 
-> **Package versioning differs by family.** RHEL publishes both an older
-> `0.3.x` line (validated here) and the newer unified `3.0.x` line; Ubuntu
-> publishes only `3.0.x`. Always confirm the exact URL resolves
-> (`curl -sI <url>`) before adding a distro. Debian's PMC pool path differs from
-> Ubuntu's and currently 404s at the obvious location — confirm its real path
-> before adding Debian items.
+> **Package versioning.** Phase 2 tracks the AzNFS `0.3.x` series on PMC prod, so
+> the URLs here use that line (RHEL `.rpm`, Ubuntu/Debian `.deb`). Always confirm
+> the exact URL resolves (`curl -sI <url>`) before adding a distro. Debian's PMC
+> pool path differs from Ubuntu's and currently 404s at the obvious location —
+> confirm its real path before adding Debian items.
 
 
 ## Known-good test inputs (RHEL)
@@ -276,70 +281,60 @@ lisa run -r .../phase3/runbooks/aznfs_multidistro.yml \
 The package **format/arch must match the VM**: a RHEL x64 VM needs an
 `x86_64.rpm`; do not feed it a `.deb` or `arm64` artifact.
 
-## Post-validation: PMC prod query (orchestration)
+## Recording the verdict (orchestration)
 
 This step runs **after** LISA validation and is **orchestration code, not a LISA
-test case** (see [`../phase3/orchestrator/`](../phase3/orchestrator)). It only
-**queries** PMC production and **notifies** the team about any gap — it never
-publishes to prod (publishing stays a manual, human-approved action).
+test case** (see [`../phase3/orchestrator/`](../phase3/orchestrator)). Phase 3 is
+LISA testing only \u2014 there is **no PMC prod query** here (Phase 2 already owns the
+"is it published on prod?" check). The orchestrator simply records each distro's
+verdict in the shared SQLite `images` table and, at the **end of the run**, sends
+**one** summary e-mail.
 
-- **LISA fail** → notify "validation failed", mark `known_unsupported`, next job.
-- **LISA pass** → run the three gates below against PMC prod, then in **every**
-  outcome mark the distro `known_supported`, set `last_validated = now`, and
-  record `pmc_prod_state` in SQLite.
+- **LISA pass** \u2192 `validated = known_supported`, `last_validated = now`.
+- **LISA fail** \u2192 `validated = known_unsupported`, `last_validated = now`. This
+  is terminal \u2014 there is no automatic retry. A LISA failure can be a real
+  package problem **or** a transient/flaky run (slow boot, SSH timeout); if a
+  flake wrongly buries a good distro, a human resets that row's `validated` back
+  to `unknown` so the pipeline re-validates it.
 
 ```mermaid
 flowchart TD
-    L{LISA result?} -->|fail| F[notify 'validation failed'<br/>→ known_unsupported] --> N[Next job]
-    L -->|pass| G1{Gate 1: prod repo defined?<br/>Compute-PMC.Onboarding:<br/>data/prod/repos/repo} -->|no| M1[notify 'validation OK but<br/>PMC prod repo missing'<br/>state=repo_missing]
-    G1 -->|yes| G2{Gate 2: config OK?<br/>repo_groups present +<br/>signing_service has esrp +<br/>package_signing=true} -->|no| M2[notify 'validation OK but<br/>config check failed'<br/>state=config_failed]
-    G2 -->|yes| G3{Gate 3: package on prod?<br/>GET packages.microsoft.com/<br/>path/Packages/a/aznfs} -->|no| M3[notify 'validation OK but<br/>package missing'<br/>state=package_missing]
-    G3 -->|yes| M4[notify 'validation OK +<br/>package found on prod'<br/>state=package_found]
-    M1 & M2 & M3 & M4 --> S[mark known_supported,<br/>last_validated=now,<br/>record pmc_prod_state] --> N
+    L{LISA result?} -->|pass| S[validated = known_supported<br/>last_validated = now]
+    L -->|fail| U[validated = known_unsupported<br/>last_validated = now<br/>+ failing tier in the summary]
+    S --> E[one summary e-mail<br/>all distros + reasons]
+    U --> E
 ```
 
-### Gate 1 — prod repo defined?
-Read the repo definition from the **Compute-PMC.Onboarding** ADO repo at
-`data/prod/repos/<repo>.json` (the runner's managed identity authenticates the
-REST read). Missing file → notify *"validation OK but PMC prod repo missing"*,
-`pmc_prod_state = repo_missing`.
+The DB row is matched on the **same 5-key identity Phase 1/Phase 2 use**
+(`publisher, image, sku, region, architecture`) so the update actually lands.
 
-### Gate 2 — repo config correct?
-From that definition, require **all three**:
-- `repo_groups` present (repo is shared into a group)
-- `signing_service` contains an **esrp** entry (e.g. `esrp_50700` is accepted)
-- `package_signing == true`
+### The failing tier (actionable failures)
 
-Any miss → notify *"validation OK but config check failed"*,
-`pmc_prod_state = config_failed`.
+Each assertion in the suite is tagged with a `[Tier N: step]` prefix
+(`[Tier 1: artifact]`, `[Tier 2: install]`, `[Tier 3: footprint]`,
+`[Tier 4: mount]`, `[Tier 4: io]`, `[Tier 5: watchdog]`). The driver extracts
+that tag from the junit failure and puts it in the summary, so a failure reads
+e.g. *"SLES 15.5 \u2014 [Tier 4: mount] failed to mount \u2026 via aznfs"* rather than a
+bare "failed".
 
-### Gate 3 — package published on prod?
-Build the prod URL from the repo's `paths` attribute (e.g. `yumrepos/amlfs-el7`)
-and check the package listing:
-`https://packages.microsoft.com/<path>/Packages/a/aznfs…`. Found → notify
-*"validation OK and package found on prod"*, `pmc_prod_state = package_found`;
-not found → notify *"validation OK but package missing"*,
-`pmc_prod_state = package_missing`.
+### The summary e-mail
 
-> **Difference from the original diagram:** we do **not** distinguish
-> *stale version* vs *up-to-date*. Gate 3 collapses to **found** vs **missing**.
+Exactly **one** e-mail per run, listing every distro and \u2014 for the failures \u2014
+the failing tier:
 
-### State recorded
+```
+[AzNFS Phase 3] validation summary: 1 supported, 1 unsupported (of 2)
 
-| `pmc_prod_state` | Meaning | `validated` |
-|------------------|---------|-------------|
-| `repo_missing` | Prod repo not defined | `known_supported` |
-| `config_failed` | Repo config incomplete | `known_supported` |
-| `package_missing` | Repo OK, package not on prod | `known_supported` |
-| `package_found` | Package live on prod | `known_supported` |
-| (LISA failed) | Validation failed | `known_unsupported` |
+Supported (known_supported) (1):
+  - RHEL 9.5
 
-> A LISA **pass** always yields `known_supported` — the prod gates only record
-> state and notify; they never downgrade the distro.
+Unsupported (known_unsupported) (1):
+  - SLES 15.5: [Tier 4: mount] failed to mount ... via aznfs
+```
 
-Run the orchestrator standalone:
+Run the orchestrator standalone (records verdicts from a results file):
 ```bash
-python -m phase3.orchestrator.pmc_prod_check <lisa_jobs.json>
+python -m phase3.orchestrator.record_result <lisa_jobs.json>
 ```
 
 ## Troubleshooting / bring-up findings
@@ -383,8 +378,5 @@ kept only as cheap defence for images that do ship a stale client.
 - Confirm exact names/paths: package (`aznfs`), service (`aznfswatchdog`),
   helper (`mount.aznfs`), install dir — via `rpm -qlp`.
 - Confirm exact AzNFS mount syntax and the EIT mount option.
-- Decide install order: tux-dev URL first vs PMC repo first.
+- Decide install order: prod URL first vs PMC repo first.
 - Later tiers: upgrade/auto-update, port-kill + multi-account resilience.
-- PMC prod query: confirm the Compute-PMC.Onboarding ADO org/project/repo and
-  the MI scope for the REST read; confirm the prod `paths`→URL layout for
-  non-yum (apt/`pool`) repos.

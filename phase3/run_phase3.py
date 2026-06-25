@@ -7,33 +7,32 @@ Turns Phase 2 output into Phase 3 outcomes with no human in the loop:
     phase2 jobs.json  ->  [ run LISA per distro ]  ->  parse pass/fail
                                                           |
                                                           v
-                                      orchestrator.run()  (PMC prod gates,
-                                      DB update, notifications)
+                                      record_result.run()  (DB update +
+                                      one summary e-mail)
 
 It is deliberately thin: all the real logic already lives in the LISA suite
-(provision + install + validate) and in ``orchestrator/pmc_prod_check.py`` (the
-post-validation gates). This script only sequences them.
+(provision + install + validate) and in ``orchestrator/record_result.py`` (the
+post-validation DB update + summary e-mail). This script only sequences them.
 
-INPUT  - a Phase 2 JSON file: a list of distro jobs, each with the image URN,
-         the published package URL + version, the PMC repo name, and an arch.
-         Example item:
+INPUT  - a Phase 2 JSON file (lisa_jobs.json): a list of distro jobs, each with
+         the marketplace image identity, the published PMC prod package URL +
+         version, and an arch. Example item:
            {
              "publisher": "redhat", "image": "rhel", "sku": "9_5",
              "version": "latest", "region": "centralindia",
-             "repo": "rhel-9.0-prod",
+             "arch": "x86_64", "distro_label": "RHEL 9.5",
              "aznfs_package_url": "https://.../aznfs-0.3.458-1.x86_64.rpm",
-             "aznfs_expected_version": "0.3.458",
-             "arch": "x86_64",
-             "distro_label": "RHEL 9.5"
+             "aznfs_version": "0.3.458"
            }
 
 FLOW
   1. For each distro, run the base runbook with ``-v`` overrides (3 cases in
      parallel via ``concurrency:3``; each case in its own auto-deleted RG).
   2. Read that run's ``lisa.junit.xml`` (the junit notifier) -> the distro is
-     "passed" when it has at least one case and zero failed cases.
-  3. Hand the pass/fail results to ``orchestrator.run()`` which applies the PMC
-     prod gates, updates the DB, and notifies the team.
+     "passed" when it has at least one case and zero failed cases; on a failure
+     the failing ``[Tier N: step]`` tag is extracted.
+  3. Hand the pass/fail results to ``record_result.run()`` which records each
+     verdict in the DB and sends one summary e-mail.
 
 Distro-level parallelism is controlled by ``--max-parallel-distros`` (each
 distro itself already runs its 3 cases in parallel). Bound it by your vCPU

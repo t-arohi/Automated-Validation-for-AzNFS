@@ -121,7 +121,7 @@ class AzNfsValidation(TestSuite):
 
     def before_case(self, log: Logger, **kwargs: Any) -> None:
         variables: dict = kwargs["variables"]
-        # Phase 2 hands off a tux-dev download URL for the exact package; that
+        # Phase 2 hands off a PMC prod download URL for the exact package; that
         # is the primary install source. If empty, fall back to a PMC repo.
         self._package_url = variables.get("aznfs_package_url", "")
         self._pmc_repo = variables.get("aznfs_pmc_repo", "")

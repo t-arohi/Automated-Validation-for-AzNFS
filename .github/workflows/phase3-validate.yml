@@ -78,13 +78,29 @@ jobs:
           if_no_artifact_found: fail
 
       # ----------------------------------------------------------------
-      # 4. Run the Phase 3 driver: per-distro LISA validation, then record
+      # 4. Ensure the LISA engine is installed on the runner (idempotent).
+      #    First run does the full apt + clone + pip install (~minutes); later
+      #    runs are a no-op fast-path when the venv already exists. Skip the
+      #    bootstrap entirely by pre-installing LISA and setting LISA_VENV.
+      # ----------------------------------------------------------------
+      - name: Ensure LISA engine
+        env:
+          LISA_VENV: ${{ vars.LISA_VENV }}
+        run: |
+          set -euo pipefail
+          VENV="${LISA_VENV:-$HOME/lisa-venv}"
+          if [ -x "$VENV/bin/lisa" ] || [ -x "$VENV/bin/python" ] && "$VENV/bin/lisa" --help >/dev/null 2>&1; then
+            echo "LISA already present at $VENV; skipping bootstrap."
+          else
+            echo "LISA not found at $VENV; running phase3/setup_lisa.sh..."
+            LISA_VENV="$VENV" bash phase3/setup_lisa.sh
+          fi
+
+      # ----------------------------------------------------------------
+      # 5. Run the Phase 3 driver: per-distro LISA validation, then record
       #    each verdict in the DB and send ONE summary e-mail.
       #
-      #    Prerequisites on the self-hosted runner (vmscan), set up once:
-      #      * LISA engine installed in a venv (default ~/lisa-venv); override
-      #        the path via the LISA_VENV repo variable if different.
-      #      * The runner's system managed identity can create test VMs.
+      #    The runner's system managed identity must be able to create test VMs.
       # ----------------------------------------------------------------
       - name: Run Phase 3 validation
         env:
@@ -120,7 +136,7 @@ jobs:
             --max-parallel-distros "${PHASE3_MAX_PARALLEL_DISTROS:-1}"
 
       # ----------------------------------------------------------------
-      # 5. Persist the DB (validated-state updates) for the next run.
+      # 6. Persist the DB (validated-state updates) for the next run.
       # ----------------------------------------------------------------
       - name: Save database cache
         if: always()

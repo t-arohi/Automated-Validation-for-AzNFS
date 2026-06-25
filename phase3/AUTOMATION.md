@@ -14,15 +14,15 @@ triggers it, what runs, and what comes out.
 ```mermaid
 flowchart LR
     P1["Phase 1<br/>scan marketplace<br/>→ needs_validation.json"]
-    P2["Phase 2<br/>publish AzNFS to PMC tux-dev<br/>→ jobs.json (image + URL + version + repo)"]
-    P3["Phase 3<br/>validate + decide<br/>→ DB update + notify"]
+    P2["Phase 2<br/>confirm AzNFS on PMC prod<br/>→ lisa_jobs.json (image + URL + version)"]
+    P3["Phase 3<br/>validate + record<br/>→ DB update + notify"]
     P1 --> P2 --> P3
 ```
 
-Phase 3's **input** is Phase 2's `jobs.json`; its **output** is an updated
-`images` table (`known_supported` / `known_unsupported`, `last_validated`,
-`pmc_prod_state`) plus notifications. Publishing to PMC **prod stays manual** —
-Phase 3 only validates and reports the gap.
+Phase 3's **input** is Phase 2's `lisa_jobs.json`; its **output** is an updated
+`images` table (`known_supported` / `known_unsupported`, `last_validated`) plus a
+single summary notification. Phase 3 is **LISA testing only** — it does not query
+PMC prod (Phase 2 owns that check).
 
 ---
 
@@ -30,18 +30,16 @@ Phase 3 only validates and reports the gap.
 
 ```mermaid
 flowchart TD
-    A["jobs.json<br/>(Phase 2 output)"] --> B{"run_phase3.py<br/>driver"}
+    A["lisa_jobs.json<br/>(Phase 2 output)"] --> B{"run_phase3.py<br/>driver"}
     B -->|per distro| C["lisa run<br/>aznfs_validation.yml<br/>concurrency:3, per-env RG"]
     C --> D["lisa.junit.xml<br/>(machine-readable results)"]
     D --> E{"all cases<br/>passed?"}
     E -->|yes| F["job.lisa_passed = true"]
-    E -->|no| G["job.lisa_passed = false"]
-    F --> H["orchestrator.run()"]
+    E -->|no| G["job.lisa_passed = false<br/>+ failing tier"]
+    F --> H["record_result.run()"]
     G --> H
-    H --> I["Gate 1: prod repo defined?"]
-    I --> J["Gate 2: repo config OK?<br/>(repo_groups, esrp, signing)"]
-    J --> K["Gate 3: package on prod?"]
-    K --> L["update images table<br/>+ notify team"]
+    H --> I["update images table<br/>(known_supported / known_unsupported)"]
+    I --> J["one summary e-mail<br/>all distros + reasons"]
 ```
 
 Three moving parts, all already in this folder:
@@ -50,21 +48,23 @@ Three moving parts, all already in this folder:
 |------|------|------|
 | **Driver** | [`run_phase3.py`](run_phase3.py) | Sequences the whole flow |
 | **LISA suite + runbook** | [`testsuites/`](testsuites), [`runbooks/aznfs_validation.yml`](runbooks/aznfs_validation.yml) | Provision VM, install, validate (5 tiers) |
-| **Orchestrator** | [`orchestrator/pmc_prod_check.py`](orchestrator/pmc_prod_check.py) | PMC prod gates, DB update, notifications |
+| **Orchestrator** | [`orchestrator/record_result.py`](orchestrator/record_result.py) | DB update + one summary e-mail |
 
 ### Step by step
 
-1. **Read** Phase 2's `jobs.json` (one entry per distro: image URN, published
-   package URL + version, PMC repo, arch).
+1. **Read** Phase 2's `lisa_jobs.json` (one entry per distro: image URN,
+   published package URL + version, arch).
 2. **Validate** each distro: the driver runs `lisa run` on the base runbook with
    `-v` overrides. All 3 cases run **in parallel** (`concurrency:3`), each in its
    **own auto-deleted resource group** (empty `resource_group_name`). The
    `junit` notifier writes `lisa.junit.xml`.
 3. **Score**: the driver parses that XML — a distro **passes** when it has at
-   least one executed case and **zero** failures.
-4. **Decide + report**: results go to `orchestrator.run()`, which for each passed
-   distro applies the three PMC-prod gates, writes the outcome to the DB, and
-   notifies the team. A failed distro is marked `known_unsupported`.
+   least one executed case and **zero** failures; on a failure it extracts the
+   failing `[Tier N: step]` tag.
+4. **Record + report**: results go to `record_result.run()`, which writes each
+   verdict to the DB (`known_supported` on pass, `known_unsupported` on fail) and
+   sends **one** summary e-mail listing every distro and the failing tier for
+   the failures.
 5. **Exit code**: `0` only if every distro passed validation — so CI can gate on
    it.
 
@@ -126,19 +126,18 @@ Minimal CI stage (illustrative):
 - **Azure** (deploy test VMs): the runner's **managed identity** — the runbook
   already uses `credential.type: default`, which picks up the pipeline identity;
   no keys in the runbook.
-- **ADO read** (Gate 1, reading the prod repo definition from
-  Compute-PMC.Onboarding): also the managed identity (see
-  `orchestrator/config.py` `ADO_*`).
+- **E-mail** (the summary): the shared Phase 1 ACS notifier
+  (`scripts/notifier.py`), authenticated by the same managed identity.
 
 ---
 
 ## 5. What you get out
 
 - **DB**: each distro's `images` row updated — `known_supported` /
-  `known_unsupported`, `last_validated`, and `pmc_prod_state` (one of
-  `repo_missing` / `config_failed` / `package_missing` / `package_found`). See
+  `known_unsupported` and `last_validated`. See
   [`orchestrator/schema_phase3.sql`](orchestrator/schema_phase3.sql).
-- **Notifications**: one message per distro outcome, plus a run summary.
+- **Notification**: a single end-of-run summary e-mail listing every distro and
+  the failing tier for any failures.
 - **Artifacts**: each distro's LISA run dir (console log, HTML report,
   `lisa.junit.xml`) under `runtime/log/...`.
 - **Exit code**: non-zero if any distro failed validation (for CI gating).
