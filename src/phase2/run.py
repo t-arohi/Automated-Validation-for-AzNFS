@@ -56,32 +56,21 @@ def _identity(entry: dict) -> tuple[str, str, str, str, str]:
 class Phase1NotifierAdapter:
     """Adapt :class:`orchestrator.NotifierLike` onto Phase 1 ``scripts/notifier``.
 
-    Per-label reasons are recorded as the actionable/pending mails are sent and
-    folded back into the single end-of-run summary mail.
+    Phase 2 sends exactly one e-mail per run -- the end-of-run summary listing
+    every distro and, for the failing ones, the reason. No per-distro mail.
     """
 
     def __init__(self, notifier_mod: Any) -> None:
         self._n = notifier_mod
-        self._reasons: dict[str, str] = {}
 
-    def notify_actionable(self, distro_label: str, message: str) -> None:
-        self._reasons[distro_label] = message
-        self._n.send_phase2_failure(distro_label, message)
-
-    def notify_pending_publish(self, distro_label: str, message: str) -> None:
-        self._reasons[distro_label] = message
-        self._n.send_phase2_pending_publish(distro_label, message)
-
-    def notify_trusted(self, distro_label: str, message: str) -> None:
-        self._n.send_phase2_trusted(distro_label)
-
-    def notify_summary(self, processed, unsupported, pending_publish, trusted, to_phase3) -> None:
+    def notify_summary(self, processed, unsupported, pending_publish, trusted, to_phase3, errors) -> None:
         self._n.send_phase2_summary(
             processed=processed,
-            unsupported=[(lbl, self._reasons.get(lbl, "")) for lbl in unsupported],
-            pending_publish=[(lbl, self._reasons.get(lbl, "")) for lbl in pending_publish],
+            unsupported=unsupported,
+            pending_publish=pending_publish,
             to_phase3=to_phase3,
             trusted=trusted,
+            errors=errors,
         )
 
 

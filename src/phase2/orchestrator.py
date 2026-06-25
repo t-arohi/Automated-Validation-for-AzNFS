@@ -5,15 +5,17 @@ over by Phase 1 the orchestrator walks three checks built straight on the public
 ``packages.microsoft.com`` version-indexed layout:
 
     Gate 1  repo exists?      GET /<distro>/<version>/prod/ returns 200
-              no  -> notify (terminate) + DB known_unsupported
+              no  -> DB known_unsupported  (reason: "repo is missing")
     Gate 2  package exists?   the aznfs dir lists a 0.3.x build for this arch
-              no  -> notify (publish manually) + DB pending_publish  [retried next run]
+              no  -> DB pending_publish    (reason: publish manually; retried next run)
     Gate 3  validation needed?  numeric-latest 0.3.x prod version p  vs  DB last_validated_version
-              no  (p == v_last) -> notify (trusted) + DB known_supported
+              no  (p == v_last) -> DB known_supported  (trusted)
               yes (first time, or p > v_last) -> emit LISA job + DB pending_validation
 
-External effects (prod client, DB, notifier) stay injectable so the flow is easy
-to unit-test and to wire into the CLI/workflow layer (see ``run.py``).
+Phase 2 sends EXACTLY ONE e-mail per run: the end-of-run summary, which lists
+every distro and -- for the failing ones -- the reason. No per-distro mail is
+sent. External effects (prod client, DB, notifier) stay injectable so the flow
+is easy to unit-test and to wire into the CLI/workflow layer (see ``run.py``).
 """
 from __future__ import annotations
 
@@ -45,16 +47,15 @@ class DbLike(Protocol):
 
 
 class NotifierLike(Protocol):
-    def notify_actionable(self, distro_label: str, message: str) -> None: ...
-    def notify_pending_publish(self, distro_label: str, message: str) -> None: ...
-    def notify_trusted(self, distro_label: str, message: str) -> None: ...
+    """Phase 2 emits a single end-of-run summary; there are no per-distro mails."""
     def notify_summary(
         self,
         processed: int,
-        unsupported: list[str],
-        pending_publish: list[str],
+        unsupported: list[tuple[str, str]],
+        pending_publish: list[tuple[str, str]],
         trusted: list[str],
         to_phase3: list[str],
+        errors: list[tuple[str, str]],
     ) -> None: ...
 
 
@@ -154,20 +155,22 @@ def write_lisa_jobs(jobs: list[dict], path: str) -> None:
 # ---------------------------------------------------------------------------
 # Per-image flow
 # ---------------------------------------------------------------------------
-def process_entry(entry: dict, prod: ProdLike, db: DbLike, notifier: NotifierLike) -> Phase2Result:
-    """Run the three prod checks for one image and apply the side-effects."""
+def process_entry(entry: dict, prod: ProdLike, db: DbLike) -> Phase2Result:
+    """Run the three prod checks for one image and apply the DB side-effect.
+
+    Returns the per-image outcome + reason; the caller (:func:`run_phase2`)
+    rolls every result into the single end-of-run summary e-mail. No per-distro
+    notification is sent here.
+    """
     ident = _identity(entry)
-    label = entry.get("distro_label", "")
     family = entry.get("family") or ""
     arch = (entry.get("architecture") or entry.get("arch") or "").lower()
 
     # Gate 1: prod repo exists?
     g1 = gate1_repo_exists(entry, prod)
     if not g1.passed:
-        reason = "repo is missing"
-        notifier.notify_actionable(label, reason)
         db.set_validation_state(ident, KNOWN_UNSUPPORTED)
-        return Phase2Result("unsupported", reason=reason)
+        return Phase2Result("unsupported", reason="repo is missing")
 
     distro, version = g1.segment, g1.resolved_version
 
@@ -184,7 +187,6 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike, notifier: NotifierLik
             f"no AzNFS packages are found ({want_arch}); "
             "please publish manually then re-run Phase 2"
         )
-        notifier.notify_pending_publish(label, reason)
         db.set_validation_state(ident, PENDING_PUBLISH)
         return Phase2Result("pending_publish", reason=reason)
 
@@ -197,10 +199,8 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike, notifier: NotifierLik
         pmc_packages.version_tuple(p) > pmc_packages.version_tuple(v_last)
     )
     if not needs_validation:
-        reason = f"already validated on prod (v{p})"
-        notifier.notify_trusted(label, reason)
         db.set_validation_state(ident, KNOWN_SUPPORTED)
-        return Phase2Result("trusted", reason=reason)
+        return Phase2Result("trusted", reason=f"already validated on prod (v{p})")
 
     lisa_job = _make_lisa_job(entry, distro, version, family, best, p)
     db.set_validation_state(ident, PENDING_VALIDATION)
@@ -215,26 +215,27 @@ def run_phase2(
     notifier: NotifierLike,
     lisa_jobs_path: str | None = None,
 ) -> list[dict]:
-    """Process every image, write the Phase 3 hand-off, and send the run summary."""
+    """Process every image, write the Phase 3 hand-off, and send the single summary."""
     lisa_jobs: list[dict] = []
-    unsupported: list[str] = []
-    pending_publish: list[str] = []
+    unsupported: list[tuple[str, str]] = []
+    pending_publish: list[tuple[str, str]] = []
     trusted: list[str] = []
     to_phase3: list[str] = []
+    errors: list[tuple[str, str]] = []
 
     for e in entries:
         label = e.get("distro_label", "?")
         try:
-            result = process_entry(e, prod, db, notifier)
+            result = process_entry(e, prod, db)
         except Exception as exc:  # one image's failure never aborts the run
             logger.exception("Unexpected error processing %s", label)
-            notifier.notify_actionable(label, f"orchestrator error (will retry next run): {exc}")
+            errors.append((label, f"orchestrator error (will retry next run): {exc}"))
             continue
 
         if result.outcome == "unsupported":
-            unsupported.append(label)
+            unsupported.append((label, result.reason))
         elif result.outcome == "pending_publish":
-            pending_publish.append(label)
+            pending_publish.append((label, result.reason))
         elif result.outcome == "trusted":
             trusted.append(label)
         else:  # to_phase3
@@ -250,9 +251,10 @@ def run_phase2(
         pending_publish=pending_publish,
         trusted=trusted,
         to_phase3=to_phase3,
+        errors=errors,
     )
     logger.info(
-        "Phase 2: %d processed | %d to-phase3 | %d trusted | %d pending-publish | %d unsupported",
-        len(entries), len(to_phase3), len(trusted), len(pending_publish), len(unsupported),
+        "Phase 2: %d processed | %d to-phase3 | %d trusted | %d pending-publish | %d unsupported | %d errors",
+        len(entries), len(to_phase3), len(trusted), len(pending_publish), len(unsupported), len(errors),
     )
     return lisa_jobs

@@ -11,20 +11,10 @@ from src.phase2 import run
 # Phase 1 module fakes (stand in for scripts/notifier.py + scripts/db_manager.py)
 # ---------------------------------------------------------------------------
 class FakeNotifierMod:
+    """Phase 2 calls only send_phase2_summary (one mail per run)."""
+
     def __init__(self):
-        self.failures = []
-        self.pending = []
-        self.trusted = []
         self.summaries = []
-
-    def send_phase2_failure(self, distro_label, detail, recipients=None):
-        self.failures.append((distro_label, detail))
-
-    def send_phase2_pending_publish(self, distro_label, detail, recipients=None):
-        self.pending.append((distro_label, detail))
-
-    def send_phase2_trusted(self, distro_label, download_url=None, version=None, recipients=None):
-        self.trusted.append((distro_label, download_url, version))
 
     def send_phase2_summary(self, processed, unsupported=None, pending_publish=None,
                             to_phase3=None, trusted=None, skipped=0, errors=None, recipients=None):
@@ -34,6 +24,7 @@ class FakeNotifierMod:
             "pending_publish": pending_publish or [],
             "to_phase3": to_phase3 or [],
             "trusted": trusted or [],
+            "errors": errors or [],
         })
 
 
@@ -87,41 +78,29 @@ def _entry(**kw):
 
 
 # ---------------------------------------------------------------------------
-# Notifier adapter
+# Notifier adapter: the only call is notify_summary, passed straight through
 # ---------------------------------------------------------------------------
-def test_notifier_adapter_routes_each_kind():
+def test_notifier_adapter_summary_passes_through_with_reasons():
     mod = FakeNotifierMod()
     ad = run.Phase1NotifierAdapter(mod)
 
-    ad.notify_actionable("Plan9 4", "no PMC prod repo")
-    ad.notify_pending_publish("Debian 11", "publish aznfs")
-    ad.notify_trusted("RHEL 9", "already validated v0.3.2")
-
-    assert mod.failures == [("Plan9 4", "no PMC prod repo")]
-    assert mod.pending == [("Debian 11", "publish aznfs")]
-    assert mod.trusted == [("RHEL 9", None, None)]
-
-
-def test_notifier_adapter_summary_pairs_reasons_into_buckets():
-    mod = FakeNotifierMod()
-    ad = run.Phase1NotifierAdapter(mod)
-
-    ad.notify_actionable("Plan9 4", "no PMC prod repo")
-    ad.notify_pending_publish("Debian 11", "publish aznfs")
     ad.notify_summary(
         processed=4,
-        unsupported=["Plan9 4"],
-        pending_publish=["Debian 11"],
+        unsupported=[("Plan9 4", "repo is missing")],
+        pending_publish=[("Debian 11", "no AzNFS packages are found (amd64); please publish manually then re-run Phase 2")],
         trusted=["RHEL 9"],
         to_phase3=["Ubuntu 22.04"],
+        errors=[],
     )
 
     s = mod.summaries[-1]
     assert s["processed"] == 4
-    assert s["unsupported"] == [("Plan9 4", "no PMC prod repo")]
-    assert s["pending_publish"] == [("Debian 11", "publish aznfs")]
+    assert s["unsupported"] == [("Plan9 4", "repo is missing")]
+    assert s["pending_publish"][0][0] == "Debian 11"
+    assert "publish" in s["pending_publish"][0][1].lower()
     assert s["trusted"] == ["RHEL 9"]
     assert s["to_phase3"] == ["Ubuntu 22.04"]
+    assert s["errors"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +192,9 @@ def test_run_end_to_end_to_phase3_writes_lisa_jobs(tmp_path):
     written = json.loads(out.read_text())
     assert written[0]["package_filename"] == "aznfs_0.3.2_amd64.deb"
     assert db_mod.calls[-1][2] == "pending_validation"
-    assert notifier_mod.summaries
+    # Exactly one mail: the summary, with this distro in the to_phase3 bucket.
+    assert len(notifier_mod.summaries) == 1
+    assert notifier_mod.summaries[-1]["to_phase3"] == ["Ubuntu 22.04"]
 
 
 def test_run_end_to_end_trusted(tmp_path):
@@ -235,4 +216,5 @@ def test_run_end_to_end_trusted(tmp_path):
 
     assert jobs == []
     assert db_mod.calls[-1][2] == "known_supported"
-    assert notifier_mod.trusted and notifier_mod.summaries
+    assert len(notifier_mod.summaries) == 1
+    assert notifier_mod.summaries[-1]["trusted"] == ["Ubuntu 22.04"]

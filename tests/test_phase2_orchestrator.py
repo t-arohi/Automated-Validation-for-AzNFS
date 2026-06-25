@@ -47,27 +47,18 @@ class FakeDb:
 
 @dataclass
 class FakeNotifier:
-    actionable: list[tuple[str, str]] = field(default_factory=list)
-    pending: list[tuple[str, str]] = field(default_factory=list)
-    trusted: list[tuple[str, str]] = field(default_factory=list)
+    """Phase 2 sends exactly one mail per run -- the summary. Capture it."""
+
     summaries: list[dict] = field(default_factory=list)
 
-    def notify_actionable(self, distro_label, message):
-        self.actionable.append((distro_label, message))
-
-    def notify_pending_publish(self, distro_label, message):
-        self.pending.append((distro_label, message))
-
-    def notify_trusted(self, distro_label, message):
-        self.trusted.append((distro_label, message))
-
-    def notify_summary(self, processed, unsupported, pending_publish, trusted, to_phase3):
+    def notify_summary(self, processed, unsupported, pending_publish, trusted, to_phase3, errors):
         self.summaries.append({
             "processed": processed,
             "unsupported": unsupported,
             "pending_publish": pending_publish,
             "trusted": trusted,
             "to_phase3": to_phase3,
+            "errors": errors,
         })
 
 
@@ -88,16 +79,16 @@ def entry(**kw):
 
 
 # ---------------------------------------------------------------------------
-# Gate 1 -> unsupported
+# Gate 1 -> unsupported  (process_entry returns the outcome + reason; no mail)
 # ---------------------------------------------------------------------------
-def test_no_prod_repo_marks_unsupported_and_notifies():
+def test_no_prod_repo_marks_unsupported():
     prod = FakeProd(repos={})  # no pocket exists
-    db, notifier = FakeDb(), FakeNotifier()
+    db = FakeDb()
 
-    r = process_entry(entry(), prod, db, notifier)
+    r = process_entry(entry(), prod, db)
 
     assert r.outcome == "unsupported"
-    assert notifier.actionable and "repo is missing" in notifier.actionable[0][1]
+    assert r.reason == "repo is missing"
     assert db.updates[-1] == (
         ("Canonical", "ubuntu-22_04-lts", "server", "eastus", "x86_64"),
         KNOWN_UNSUPPORTED,
@@ -110,12 +101,12 @@ def test_no_prod_repo_marks_unsupported_and_notifies():
 def test_repo_exists_but_no_aznfs_marks_pending_publish():
     # Debian real case: /debian/11/prod/ exists but no aznfs published.
     prod = FakeProd(repos={"debian": {"11"}}, packages={})
-    db, notifier = FakeDb(), FakeNotifier()
+    db = FakeDb()
 
-    r = process_entry(entry(publisher="Debian", distro_label="Debian 11"), prod, db, notifier)
+    r = process_entry(entry(publisher="Debian", distro_label="Debian 11"), prod, db)
 
     assert r.outcome == "pending_publish"
-    assert notifier.pending and "publish" in notifier.pending[0][1].lower()
+    assert "publish" in r.reason.lower()
     assert db.updates[-1][1] == PENDING_PUBLISH
 
 
@@ -125,9 +116,9 @@ def test_aznfs_present_for_other_arch_only_is_pending_publish():
         repos={"ubuntu": {"22.04"}},
         packages={("ubuntu", "22.04"): ["aznfs_0.3.2_arm64.deb"]},
     )
-    db, notifier = FakeDb(), FakeNotifier()
+    db = FakeDb()
 
-    r = process_entry(entry(architecture="x86_64"), prod, db, notifier)
+    r = process_entry(entry(architecture="x86_64"), prod, db)
 
     assert r.outcome == "pending_publish"
     assert db.updates[-1][1] == PENDING_PUBLISH
@@ -141,13 +132,13 @@ def test_latest_already_validated_marks_trusted():
         repos={"ubuntu": {"22.04"}},
         packages={("ubuntu", "22.04"): ["aznfs_0.3.2_amd64.deb"]},
     )
-    db, notifier = FakeDb(), FakeNotifier()
+    db = FakeDb()
 
-    r = process_entry(entry(last_validated_version="0.3.2"), prod, db, notifier)
+    r = process_entry(entry(last_validated_version="0.3.2"), prod, db)
 
     assert r.outcome == "trusted"
     assert r.lisa_job is None
-    assert notifier.trusted and "0.3.2" in notifier.trusted[0][1]
+    assert "0.3.2" in r.reason
     assert db.updates[-1][1] == KNOWN_SUPPORTED
 
 
@@ -159,9 +150,9 @@ def test_first_validation_emits_lisa_job():
         repos={"ubuntu": {"22.04"}},
         packages={("ubuntu", "22.04"): ["aznfs_0.3.2_amd64.deb"]},
     )
-    db, notifier = FakeDb(), FakeNotifier()
+    db = FakeDb()
 
-    r = process_entry(entry(last_validated_version=""), prod, db, notifier)
+    r = process_entry(entry(last_validated_version=""), prod, db)
 
     assert r.outcome == "to_phase3"
     assert r.lisa_job is not None
@@ -185,9 +176,9 @@ def test_newer_prod_version_than_db_needs_validation_picks_numeric_max():
             "aznfs_0.3.18_amd64.deb",
         ]},
     )
-    db, notifier = FakeDb(), FakeNotifier()
+    db = FakeDb()
 
-    r = process_entry(entry(last_validated_version="0.3.9"), prod, db, notifier)
+    r = process_entry(entry(last_validated_version="0.3.9"), prod, db)
 
     assert r.outcome == "to_phase3"
     assert r.lisa_job["aznfs_version"] == "0.3.18"
@@ -207,9 +198,9 @@ def test_series_filter_ignores_non_0_3_lineages():
             "aznfs_3.0.18_amd64.deb",
         ]},
     )
-    db, notifier = FakeDb(), FakeNotifier()
+    db = FakeDb()
 
-    r = process_entry(entry(last_validated_version="0.3.46"), prod, db, notifier)
+    r = process_entry(entry(last_validated_version="0.3.46"), prod, db)
 
     assert r.outcome == "to_phase3"
     assert r.lisa_job["aznfs_version"] == "0.3.458"
@@ -225,9 +216,9 @@ def test_only_non_series_builds_is_pending_publish():
             "aznfs_1.0.4_amd64.deb",
         ]},
     )
-    db, notifier = FakeDb(), FakeNotifier()
+    db = FakeDb()
 
-    r = process_entry(entry(architecture="x86_64"), prod, db, notifier)
+    r = process_entry(entry(architecture="x86_64"), prod, db)
 
     assert r.outcome == "pending_publish"
     assert db.updates[-1][1] == PENDING_PUBLISH
@@ -242,12 +233,12 @@ def test_yum_minor_fallback_and_arch_mapping_to_phase3():
             "aznfs-0.3.2-1.aarch64.rpm",
         ]},
     )
-    db, notifier = FakeDb(), FakeNotifier()
+    db = FakeDb()
 
     r = process_entry(
         entry(publisher="RedHat", distro_label="RHEL 9.8", family="yum",
               architecture="x86_64", image="RHEL", sku="9-lvm"),
-        prod, db, notifier,
+        prod, db,
     )
 
     assert r.outcome == "to_phase3"
@@ -257,9 +248,9 @@ def test_yum_minor_fallback_and_arch_mapping_to_phase3():
 
 
 # ---------------------------------------------------------------------------
-# run_phase2 aggregation
+# run_phase2 aggregation -> exactly one summary mail with every distro + reason
 # ---------------------------------------------------------------------------
-def test_run_phase2_buckets_writes_jobs_and_summary(tmp_path):
+def test_run_phase2_buckets_writes_jobs_and_single_summary(tmp_path):
     prod = FakeProd(
         repos={"ubuntu": {"22.04"}, "debian": {"11"}},
         packages={("ubuntu", "22.04"): ["aznfs_0.3.2_amd64.deb"]},
@@ -278,24 +269,31 @@ def test_run_phase2_buckets_writes_jobs_and_summary(tmp_path):
     jobs = run_phase2(entries, prod, db, notifier, lisa_jobs_path=str(out))
 
     assert len(jobs) == 1
+    # Exactly one mail (the summary) for the whole run.
+    assert len(notifier.summaries) == 1
     s = notifier.summaries[-1]
     assert s["processed"] == 4
     assert s["to_phase3"] == ["Ubuntu 22.04"]
     assert s["trusted"] == ["Ubuntu 22.04"]
-    assert s["pending_publish"] == ["Debian 11"]
-    assert s["unsupported"] == ["Plan9 4"]
+    # Failing buckets carry (distro_label, reason) so the mail explains each one.
+    assert [lbl for lbl, _ in s["pending_publish"]] == ["Debian 11"]
+    assert "publish" in s["pending_publish"][0][1].lower()
+    assert s["unsupported"] == [("Plan9 4", "repo is missing")]
+    assert s["errors"] == []
 
     written = json.loads(out.read_text())
     assert written[0]["package_filename"] == "aznfs_0.3.2_amd64.deb"
 
 
-def test_run_phase2_swallows_per_entry_errors():
+def test_run_phase2_swallows_per_entry_errors_into_summary():
     prod = FakeProd(raise_on_resolve=True)
     db, notifier = FakeDb(), FakeNotifier()
 
     jobs = run_phase2([entry()], prod, db, notifier, lisa_jobs_path=None)
 
     assert jobs == []
-    assert notifier.actionable and "error" in notifier.actionable[0][1].lower()
-    # summary still sent, with the failed entry in no success bucket
-    assert notifier.summaries[-1]["processed"] == 1
+    # Still exactly one summary; the failed entry shows up in the errors bucket.
+    assert len(notifier.summaries) == 1
+    s = notifier.summaries[-1]
+    assert s["processed"] == 1
+    assert s["errors"] and "error" in s["errors"][0][1].lower()
