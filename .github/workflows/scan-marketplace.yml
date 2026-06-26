@@ -77,9 +77,11 @@ jobs:
           AZURE_MANAGED_IDENTITY_CLIENT_ID: ${{ vars.AZURE_MANAGED_IDENTITY_CLIENT_ID }}
           ACS_ENDPOINT: ${{ vars.ACS_ENDPOINT }}
           ACS_SENDER: ${{ vars.ACS_SENDER }}
-          # One-time backlog feed: 'true' only on a manual dispatch with the box
-          # ticked; empty on scheduled runs (so they stay delta-only).
-          EMIT_BACKLOG: ${{ inputs.emit_backlog }}
+          # One-shot backlog feed. Source from the repo variable (so it applies
+          # to the scheduled run too) or the manual-dispatch input. The scanner
+          # self-disables after one emit via a DB one-shot token, so a forgotten
+          # variable will NOT keep re-provisioning Phase 3 VMs.
+          EMIT_BACKLOG: ${{ vars.EMIT_BACKLOG || inputs.emit_backlog }}
         run: |
           cd scripts
           set +e

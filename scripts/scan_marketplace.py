@@ -429,27 +429,43 @@ def main() -> int:
     write_step_summary(distro_rollup, len(all_records))
 
     # ------------------------------------------------------------------
-    # Step 5c — One-time backlog feed  (opt-in, temporary: EMIT_BACKLOG=1)
+    # Step 5c — One-shot backlog feed  (opt-in, temporary: EMIT_BACKLOG)
     # ------------------------------------------------------------------
     # Normally needs_validation.json carries only the new/updated delta, so
     # distros already cached as validated='unknown' (e.g. after the DB cache is
-    # restored) never reach Phase 2/3. For a single manual run, setting
-    # EMIT_BACKLOG=1 overwrites the hand-off with the FULL unvalidated backlog so
-    # those releases get validated for the first time. It is deduped to one
-    # representative SKU per (distro_label, architecture) -- emitting every SKU
-    # (~1k rows) would overload Phase 2's per-entry prod checks and Phase 3's VM
-    # provisioning. Scheduled runs never set this, so they stay delta-only and
-    # needs_validation.json "flushes" back to the delta automatically next run.
-    if os.environ.get("EMIT_BACKLOG", "").strip().lower() in ("1", "true", "yes"):
-        backlog = dedup_backlog(unvalidated_records)
-        with open(config.OUTPUT_JSON, "w", encoding="utf-8") as fh:
-            json.dump(backlog, fh, indent=2)
-        logger.warning(
-            "EMIT_BACKLOG set: wrote %d backlog entry(ies) (one per "
-            "distro_label+architecture, collapsed from %d unvalidated SKU "
-            "row(s)) to %s -- one-time full-backlog feed for Phase 2/3.",
-            len(backlog), len(unvalidated_records), config.OUTPUT_JSON,
-        )
+    # restored) never reach Phase 2/3. Arming EMIT_BACKLOG (a repo variable, so
+    # it also applies to the scheduled run -- or the workflow_dispatch input)
+    # overwrites the hand-off with the FULL unvalidated backlog so those releases
+    # get validated for the first time. It is deduped to one representative SKU
+    # per (distro_label, architecture) -- emitting every SKU (~1k rows) would
+    # overload Phase 2's per-entry prod checks and Phase 3's VM provisioning.
+    #
+    # It is a ONE-SHOT: the feed emits at most once per distinct EMIT_BACKLOG
+    # value (the "token"), recorded in the DB meta table (which rides the cached
+    # marketplace.db across runs). So once the armed run has emitted, every later
+    # scan -- even with the repo variable still set -- stays delta-only and will
+    # NOT keep re-feeding Phase 3 real VMs. Re-arm by setting EMIT_BACKLOG to a
+    # new value (e.g. a fresh date). Empty / 0 / false / no = disabled.
+    emit_token = os.environ.get("EMIT_BACKLOG", "").strip()
+    if emit_token.lower() not in ("", "0", "false", "no"):
+        already = db_manager.get_meta(config.DB_PATH, "backlog_emitted_token")
+        if already == emit_token:
+            logger.info(
+                "EMIT_BACKLOG=%r already consumed (one-shot); staying delta-only.",
+                emit_token,
+            )
+        else:
+            backlog = dedup_backlog(unvalidated_records)
+            with open(config.OUTPUT_JSON, "w", encoding="utf-8") as fh:
+                json.dump(backlog, fh, indent=2)
+            db_manager.set_meta(config.DB_PATH, "backlog_emitted_token", emit_token)
+            logger.warning(
+                "EMIT_BACKLOG=%r: wrote %d backlog entry(ies) (one per "
+                "distro_label+architecture, collapsed from %d unvalidated SKU "
+                "row(s)) to %s -- one-shot full-backlog feed for Phase 2/3 consumed.",
+                emit_token, len(backlog), len(unvalidated_records), config.OUTPUT_JSON,
+            )
+
 
     # ------------------------------------------------------------------
     # Step 6 — Notify + exit code  (distro-release granularity)
