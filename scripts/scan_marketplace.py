@@ -193,6 +193,34 @@ def rollup_by_distro(images: list[dict]) -> list[dict]:
     return rollup
 
 
+def dedup_backlog(records: list[dict]) -> list[dict]:
+    """Pick one representative SKU per (distro_label, architecture) from a backlog.
+
+    Phase 2 probes PMC prod once per distro release + architecture, and Phase 3
+    provisions one VM per emitted job, so handing over every still-unknown SKU
+    row (there can be ~1k for ~50 releases) would multiply prod HTTP checks and
+    spin up duplicate VMs for the same release. Collapsing to a single
+    representative per (distro_label, architecture) keeps a concrete marketplace
+    image for Phase 3 while bounding the work to roughly one job per
+    release/arch. The newest marketplace ``version`` in each group is chosen so
+    the pick is deterministic and validates the latest image.
+    """
+    chosen: dict[tuple[str, str], dict] = {}
+    for r in records:
+        key = (r.get("distro_label", ""), r.get("architecture", ""))
+        cur = chosen.get(key)
+        if cur is None or (r.get("version", "") > cur.get("version", "")):
+            chosen[key] = r
+    return sorted(
+        chosen.values(),
+        key=lambda r: (
+            r.get("family", ""),
+            r.get("distro_label", ""),
+            r.get("architecture", ""),
+        ),
+    )
+
+
 def write_step_summary(rollup: list[dict], total_tracked: int) -> None:
     """Render the cut-down distro list into the GitHub Actions run summary.
 
@@ -399,6 +427,29 @@ def main() -> int:
     # always surfaces the full tracked backlog -- not just the new/updated delta
     # in needs_validation.json. No-op locally (GITHUB_STEP_SUMMARY unset).
     write_step_summary(distro_rollup, len(all_records))
+
+    # ------------------------------------------------------------------
+    # Step 5c — One-time backlog feed  (opt-in, temporary: EMIT_BACKLOG=1)
+    # ------------------------------------------------------------------
+    # Normally needs_validation.json carries only the new/updated delta, so
+    # distros already cached as validated='unknown' (e.g. after the DB cache is
+    # restored) never reach Phase 2/3. For a single manual run, setting
+    # EMIT_BACKLOG=1 overwrites the hand-off with the FULL unvalidated backlog so
+    # those releases get validated for the first time. It is deduped to one
+    # representative SKU per (distro_label, architecture) -- emitting every SKU
+    # (~1k rows) would overload Phase 2's per-entry prod checks and Phase 3's VM
+    # provisioning. Scheduled runs never set this, so they stay delta-only and
+    # needs_validation.json "flushes" back to the delta automatically next run.
+    if os.environ.get("EMIT_BACKLOG", "").strip().lower() in ("1", "true", "yes"):
+        backlog = dedup_backlog(unvalidated_records)
+        with open(config.OUTPUT_JSON, "w", encoding="utf-8") as fh:
+            json.dump(backlog, fh, indent=2)
+        logger.warning(
+            "EMIT_BACKLOG set: wrote %d backlog entry(ies) (one per "
+            "distro_label+architecture, collapsed from %d unvalidated SKU "
+            "row(s)) to %s -- one-time full-backlog feed for Phase 2/3.",
+            len(backlog), len(unvalidated_records), config.OUTPUT_JSON,
+        )
 
     # ------------------------------------------------------------------
     # Step 6 — Notify + exit code  (distro-release granularity)
