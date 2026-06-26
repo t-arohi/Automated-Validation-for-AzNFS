@@ -193,6 +193,52 @@ def rollup_by_distro(images: list[dict]) -> list[dict]:
     return rollup
 
 
+def write_step_summary(rollup: list[dict], total_tracked: int) -> None:
+    """Render the cut-down distro list into the GitHub Actions run summary.
+
+    One row per tracked OS release still awaiting validation (SKU / version /
+    region / architecture collapsed to counts) -- the same view the team reads
+    after every daily scan. No-op when ``GITHUB_STEP_SUMMARY`` is unset (local
+    runs); failures are swallowed so they never affect the scan's exit code.
+    """
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    try:
+        lines: list[str] = []
+        if not rollup:
+            lines.append(
+                f"## Marketplace scan: 0 distro release(s) awaiting validation "
+                f"({total_tracked} SKU row(s) tracked)\n"
+            )
+        else:
+            lines.append(f"## {len(rollup)} distro release(s) tracked (cut-down list)\n")
+            lines.append(
+                "_One row per OS release \u2014 SKU/version/region/architecture "
+                "collapsed to counts._\n"
+            )
+            lines.append("| Family | Distro Label | Publishers | Architectures | # SKUs |")
+            lines.append("|---|---|---|---|---|")
+            for d in rollup:
+                pubs = ", ".join(d.get("publishers", []))
+                arch = ", ".join(d.get("architectures", []))
+                lines.append(
+                    f"| {d.get('family','')}"
+                    f" | {d.get('distro_label','')}"
+                    f" | {pubs}"
+                    f" | {arch}"
+                    f" | {d.get('sku_count','')} |"
+                )
+            lines.append(
+                "\n_Phase 2 consumes `output/needs_validation.json`; e-mail for "
+                "**new** releases is sent in-process via ACS + Managed Identity._"
+            )
+        with open(summary_path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    except Exception as exc:  # never let a reporting glitch fail the scan
+        logger.warning("Could not write step summary: %s", exc)
+
+
 def buckets_by_state(records: list[dict]) -> dict[str, list[dict]]:
     """Group tracked images into per-validation-state buckets for the monthly reminder.
 
@@ -347,6 +393,12 @@ def main() -> int:
         "%d unvalidated SKU row(s) (of %d tracked).",
         len(distro_rollup), len(unvalidated_records), len(all_records),
     )
+
+    # Render the cut-down distro list (one row per OS release, with SKU counts)
+    # into the GitHub Actions run summary. Shown on EVERY run so the daily scan
+    # always surfaces the full tracked backlog -- not just the new/updated delta
+    # in needs_validation.json. No-op locally (GITHUB_STEP_SUMMARY unset).
+    write_step_summary(distro_rollup, len(all_records))
 
     # ------------------------------------------------------------------
     # Step 6 — Notify + exit code  (distro-release granularity)

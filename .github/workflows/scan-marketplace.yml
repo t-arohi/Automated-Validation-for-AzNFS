@@ -85,37 +85,11 @@ jobs:
         continue-on-error: true
 
       # ----------------------------------------------------------------
-      # 5. Render a Markdown summary into the Actions UI for quick review.
+      # 5. The run summary (the cut-down distro list with SKU counts) is
+      #    written directly by scan_marketplace.py via $GITHUB_STEP_SUMMARY,
+      #    so it reflects the FULL tracked backlog every run -- not just the
+      #    new/updated delta. No separate step needed here.
       # ----------------------------------------------------------------
-      - name: Write step summary
-        if: always()
-        run: |
-          python3 - <<'EOF'
-          import json, os
-          summary = os.environ["GITHUB_STEP_SUMMARY"]
-          path = "output/needs_validation.json"
-          try:
-              images = json.load(open(path, encoding="utf-8"))
-          except Exception:
-              images = []
-          with open(summary, "a", encoding="utf-8") as fh:
-              if not images:
-                  fh.write("## Marketplace scan: no new SKU image(s) flagged this run.\n")
-              else:
-                  fh.write(f"## {len(images)} new SKU image(s) flagged for validation\n\n")
-                  fh.write("_New marketplace image rows discovered this run (per SKU). Phase 2 consumes `output/needs_validation.json`._\n\n")
-                  fh.write("| Publisher | Distro Label | SKU | Version | Arch |\n")
-                  fh.write("|---|---|---|---|---|\n")
-                  for d in images:
-                      fh.write(
-                          f"| {d.get('publisher','')}"
-                          f" | {d.get('distro_label','')}"
-                          f" | {d.get('sku','')}"
-                          f" | {d.get('version','')}"
-                          f" | {d.get('architecture','')} |\n"
-                      )
-                  fh.write("\n_Email notification for **new** releases was sent in-process by `notifier.py` via ACS + Managed Identity._\n")
-          EOF
 
       # ----------------------------------------------------------------
       # 6. Upload the JSON output as a workflow artifact (always, for audit)
