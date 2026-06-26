@@ -1,11 +1,31 @@
-# Marketplace Distro Scanner (Phase 1)
+# Marketplace Distro Scanner
 
-Phase 1 of the AzNFS marketplace validation pipeline.
+The **AzNFS marketplace validation pipeline**. It discovers new Azure Marketplace
+Linux images, checks whether the AzNFS package is published for them on PMC
+**production**, validates that the package actually installs and works on each
+distro with **LISA**, and records a per-distro support decision — all unattended.
+
+## Pipeline overview
+
+| Phase | What it does | Output |
+|---|---|---|
+| **Phase 1 — Scan** (`scripts/`) | Discover marketplace images for the tracked publishers/regions, classify NEW / UPDATED / UNCHANGED in SQLite, e-mail new releases plus a monthly status digest. | `output/needs_validation.json` |
+| **Phase 2 — Prod validation** (`src/phase2/`) | For each image, check the version-indexed PMC **prod** layout (`packages.microsoft.com/<distro>/<version>/prod/`): does the repo exist? is the tracked `0.3.x` AzNFS package published? is it newer than what was last validated? Emit a LISA job for the ones that need testing. | `output/lisa_jobs.json` |
+| **Phase 3 — LISA validation** (`phase3/`) | Provision a VM of each distro, install the AzNFS package, run the 5-tier test suite, and record `known_supported` / `known_unsupported` in the shared DB, with one summary e-mail. | DB verdict + e-mail |
+
+The three phases share one SQLite DB (`marketplace.db`); a distro's `validated`
+state is the hand-off between them. Phase 2 runs after Phase 1 and Phase 3 after
+Phase 2 (GitHub Actions `workflow_run` chaining on the same self-hosted runner,
+serialized on a shared `marketplace-db` concurrency group).
+
+---
+
+## Phase 1 — Scan
 
 Discovers Azure Marketplace VM images for a selected set of publishers and
-regions, tracks them in a local SQLite database, emails the team about new
+regions, tracks them in a local SQLite database, e-mails the team about new
 SKUs and version bumps, and emits a JSON list of images that still need
-validation. Designed to run unattended every day at 00:00 UTC.
+validation. Designed to run unattended every day.
 
 ## Runtime architecture
 
@@ -25,7 +45,7 @@ python scripts/scan_marketplace.py
         ├── SQLite (marketplace.db, cached between runs)
         │       └── classify each SKU: NEW / UPDATED / UNCHANGED
         │
-        └── output/distros_to_validate.json    (artifact, audit trail)
+        └── output/needs_validation.json    (the single Phase 1 artifact)
 ```
 
 Key properties:
@@ -76,7 +96,7 @@ highlights:
 | `family` | `apt` or `yum` — used by Phase 2 gates. |
 | `distro_label` | Human-readable name, e.g. `Ubuntu 24.04`, `RHEL 9`. |
 | `version` | Latest version observed. Bumped in place on a new release. |
-| `validated` | Lifecycle: `unknown`, `known_supported`, `known_unsupported`. **Preserved across version bumps** so manual validation state is not lost. |
+| `validated` | Lifecycle: `unknown` → `pending_validation` → `known_supported` / `known_unsupported` (Phase 2 may park a row at `pending_publish` while it waits for a manual prod publish). **Preserved across version bumps** so manual validation state is not lost. |
 | `date_added`, `last_modified`, `last_checked` | All three are reset to "now" on a version bump. |
 
 ### Classification per scan
@@ -93,8 +113,9 @@ are silently re-stamped.
 
 ## Output
 
-`output/distros_to_validate.json` is **overwritten** every run with the list of
-NEW + UPDATED images from that scan. Schema per entry:
+`output/needs_validation.json` is the **only** file Phase 1 writes. It is
+**overwritten** every run with the list of NEW + UPDATED images from that scan
+(one row per SKU). Schema per entry:
 
 ```json
 {
@@ -112,8 +133,10 @@ NEW + UPDATED images from that scan. Schema per entry:
 ```
 
 Uploaded as a workflow artifact (`marketplace-scan-<run_number>`) with 30-day
-retention. The Actions UI also gets a rendered Markdown summary of the same
-table.
+retention, and consumed by Phase 2. The distro-level rollup (one entry per OS
+release) is still computed in memory for the new-release diff and the monthly
+digest — it is just not persisted to a second file. The Actions UI also gets a
+rendered Markdown summary of the new images.
 
 ## Email
 
@@ -127,13 +150,15 @@ subject:
 - `[AzFilesAutoPackager] 3 new distro release(s) need validation`
 
 If no new distro releases are found, **no email is sent that day**. Separately,
-once per calendar month — on the first scan of the month — a reminder lists every
-tracked distro release grouped by package family (`apt` / `yum`), so the team
-gets a periodic snapshot without daily noise. This monthly snapshot is
-independent of the new-release alert: on the month's first run, if that scan also
-finds new releases, **both** emails go out.
+once per calendar month — on the first scan of the month — a digest lists every
+tracked distro release grouped into **three buckets by AzNFS validation state**
+(`known_supported` / `known_unsupported` / `unknown`, the last folding in the
+not-yet-decided `pending_*` states), so the team gets a periodic status snapshot
+without daily noise. This monthly digest is independent of the new-release alert:
+on the month's first run, if that scan also finds new releases, **both** emails go
+out.
 
-- `[AzFilesAutoPackager] Monthly reminder: 12 distro release(s) tracked`
+- `[AzFilesAutoPackager] Monthly reminder: 8 supported, 3 unsupported, 1 unknown`
 
 Notification failures are caught and logged — they never crash the scan.
 
@@ -206,6 +231,9 @@ it runs without Azure credentials or network access.
 
 ## What's next
 
-Phase 2 (Gate 1 onwards) will consume `output/needs_validation.json` and the
-DB to drive ESRP signing, PMC publishing, and LISA validation. The notifier
-module is reused by later phases.
+Phase 2 consumes `output/needs_validation.json` and the shared DB to check
+AzNFS coverage on PMC **prod** (anonymous, version-indexed `packages.microsoft.com`
+— no PMC API, no signing, no publishing), emitting `output/lisa_jobs.json` for
+the releases that need testing. Phase 3 then runs the LISA 5-tier suite on each
+and records the `known_supported` / `known_unsupported` verdict back into the
+shared DB. The `notifier.py` module is reused by all three phases.

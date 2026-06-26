@@ -93,28 +93,26 @@ jobs:
           python3 - <<'EOF'
           import json, os
           summary = os.environ["GITHUB_STEP_SUMMARY"]
-          path = "output/distros_to_validate.json"
+          path = "output/needs_validation.json"
           try:
-              distros = json.load(open(path, encoding="utf-8"))
+              images = json.load(open(path, encoding="utf-8"))
           except Exception:
-              distros = []
+              images = []
           with open(summary, "a", encoding="utf-8") as fh:
-              if not distros:
-                  fh.write("## Marketplace scan: no distro releases tracked yet.\n")
+              if not images:
+                  fh.write("## Marketplace scan: no new SKU image(s) flagged this run.\n")
               else:
-                  fh.write(f"## {len(distros)} distro release(s) tracked (cut-down list)\n\n")
-                  fh.write("_One row per OS release — SKU/version/region/architecture collapsed to counts._\n\n")
-                  fh.write("| Family | Distro Label | Publishers | Architectures | # SKUs |\n")
+                  fh.write(f"## {len(images)} new SKU image(s) flagged for validation\n\n")
+                  fh.write("_New marketplace image rows discovered this run (per SKU). Phase 2 consumes `output/needs_validation.json`._\n\n")
+                  fh.write("| Publisher | Distro Label | SKU | Version | Arch |\n")
                   fh.write("|---|---|---|---|---|\n")
-                  for d in distros:
-                      pubs = ", ".join(d.get("publishers", []))
-                      arch = ", ".join(d.get("architectures", []))
+                  for d in images:
                       fh.write(
-                          f"| {d.get('family','')}"
+                          f"| {d.get('publisher','')}"
                           f" | {d.get('distro_label','')}"
-                          f" | {pubs}"
-                          f" | {arch}"
-                          f" | {d.get('sku_count','')} |\n"
+                          f" | {d.get('sku','')}"
+                          f" | {d.get('version','')}"
+                          f" | {d.get('architecture','')} |\n"
                       )
                   fh.write("\n_Email notification for **new** releases was sent in-process by `notifier.py` via ACS + Managed Identity._\n")
           EOF
@@ -128,7 +126,6 @@ jobs:
         with:
           name: marketplace-scan-${{ github.run_number }}
           path: |
-            output/distros_to_validate.json
             output/needs_validation.json
           retention-days: 30
           if-no-files-found: ignore

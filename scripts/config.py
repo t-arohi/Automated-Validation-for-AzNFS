@@ -55,10 +55,9 @@ OUTPUT_DIR: str = os.environ.get(
 )
 
 OUTPUT_JSON: str = os.path.join(OUTPUT_DIR, "needs_validation.json")
-
-# Distro-level rollup: the de-duplicated list of OS releases AzNFS must validate,
-# collapsed from the per-SKU rows (sku/version/region/architecture/offer folded away).
-OUTPUT_DISTROS: str = os.path.join(OUTPUT_DIR, "distros_to_validate.json")
+# needs_validation.json is the ONLY artifact Phase 1 writes. The distro-level
+# rollup (the de-duplicated OS-release view) is computed in memory for the
+# new-release diff and the monthly digest; it is not persisted to a file.
 
 # ---------------------------------------------------------------------------
 # Notifications  (Azure Communication Services Email)

@@ -193,20 +193,30 @@ def rollup_by_distro(images: list[dict]) -> list[dict]:
     return rollup
 
 
-def buckets_by_family(records: list[dict]) -> dict[str, list[dict]]:
-    """Group tracked images into per-family buckets for the monthly reminder.
+def buckets_by_state(records: list[dict]) -> dict[str, list[dict]]:
+    """Group tracked images into per-validation-state buckets for the monthly reminder.
 
-    For each (family, distro_label) the latest version observed is kept, with the
-    contributing publishers and the number of SKUs. Returns {family: [distro,...]}.
+    Buckets are ``known_supported`` / ``known_unsupported`` / ``unknown`` (the
+    last also folds in the not-yet-decided ``pending_*`` states). For each
+    (state, distro_label) the latest version observed is kept, with the
+    contributing publishers and the number of SKUs. Returns {state: [distro,...]}.
     """
+    def _state_of(img: dict) -> str:
+        v = img.get("validated", "") or ""
+        if v == "known_supported":
+            return "known_supported"
+        if v == "known_unsupported":
+            return "known_unsupported"
+        return "unknown"  # unknown + pending_publish + pending_validation + new
+
     groups: dict[tuple[str, str], dict] = {}
     for img in records:
-        family = img.get("family", "") or "unknown"
-        key = (family, img.get("distro_label", ""))
+        state = _state_of(img)
+        key = (state, img.get("distro_label", ""))
         g = groups.get(key)
         if g is None:
             g = {
-                "family": family,
+                "state": state,
                 "distro_label": key[1],
                 "version": img.get("version", ""),
                 "publishers": set(),
@@ -222,7 +232,7 @@ def buckets_by_family(records: list[dict]) -> dict[str, list[dict]]:
 
     buckets: dict[str, list[dict]] = {}
     for g in groups.values():
-        buckets.setdefault(g["family"], []).append(
+        buckets.setdefault(g["state"], []).append(
             {
                 "distro_label": g["distro_label"],
                 "version": g["version"],
@@ -230,8 +240,8 @@ def buckets_by_family(records: list[dict]) -> dict[str, list[dict]]:
                 "sku_count": g["sku_count"],
             }
         )
-    for fam in buckets:
-        buckets[fam].sort(key=lambda d: d["distro_label"])
+    for st in buckets:
+        buckets[st].sort(key=lambda d: d["distro_label"])
     return buckets
 
 
@@ -321,27 +331,21 @@ def main() -> int:
     # ------------------------------------------------------------------
     # Step 5b — Distro-level rollup  (the unit AzNFS validates)
     # ------------------------------------------------------------------
-    # The cut-down master list: every tracked SKU collapsed to its unique OS
-    # release. This is what Phase 2/3 consume — sku/version/region/arch/offer
-    # are not part of a distro's identity.
-    #
-    # Only releases still awaiting validation belong in "distros to validate":
-    # a SKU is inserted as validated='unknown' and stays here until Phase 2/3
-    # marks it known_supported / known_unsupported, at which point its release
-    # drops out of the file. A release is listed while ANY of its SKUs is still
-    # unknown.
+    # Collapse every still-unknown SKU row to its unique OS release. A SKU is
+    # inserted as validated='unknown' and contributes to its release until
+    # Phase 2/3 marks it known_supported / known_unsupported. This distro view
+    # drives the new-release diff and the e-mail; it is kept IN MEMORY ONLY —
+    # needs_validation.json (written above) is the single JSON artifact Phase 1
+    # produces (and Phase 2's input).
     all_records = db_manager.get_all_records(config.DB_PATH)
     unvalidated_records = [
         r for r in all_records if r.get("validated") == "unknown"
     ]
     distro_rollup = rollup_by_distro(unvalidated_records)
-    with open(config.OUTPUT_DISTROS, "w", encoding="utf-8") as fh:
-        json.dump(distro_rollup, fh, indent=2)
     logger.info(
         "Distros to validate: %d unvalidated release(s) collapsed from "
-        "%d unvalidated SKU row(s) (of %d tracked) -> %s",
+        "%d unvalidated SKU row(s) (of %d tracked).",
         len(distro_rollup), len(unvalidated_records), len(all_records),
-        config.OUTPUT_DISTROS,
     )
 
     # ------------------------------------------------------------------
@@ -360,12 +364,13 @@ def main() -> int:
     # Sent at most once per calendar month (UTC), on the FIRST scan of the month,
     # regardless of whether that run also found new releases. So on the month's
     # first run both can go out: the new-release email (if any) AND this snapshot
-    # of every tracked distro grouped by package family. The other ~29 daily runs
+    # of every tracked distro grouped by AzNFS validation state (three groups:
+    # known_supported / known_unsupported / unknown). The other ~29 daily runs
     # stay silent. Using the first run of the month (not strictly the 1st) means
     # a missed run on the 1st still sends on the next run.
     current_month = datetime.now(timezone.utc).strftime("%Y-%m")
     if db_manager.get_meta(config.DB_PATH, "last_monthly_reminder") != current_month:
-        buckets = buckets_by_family(all_records)
+        buckets = buckets_by_state(all_records)
         if buckets:
             notifier.send_monthly_reminder(buckets)
             db_manager.set_meta(config.DB_PATH, "last_monthly_reminder", current_month)

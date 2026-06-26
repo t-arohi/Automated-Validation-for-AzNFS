@@ -100,18 +100,21 @@ def send_phase1_summary(
     _send(subject, plain, html_body, recipients)
 
 
-# Family display order + titles for the monthly reminder.
-_FAMILY_ORDER = ["apt", "yum"]
-_FAMILY_TITLES = {
-    "apt": "apt — Debian / Ubuntu family",
-    "yum": "yum — RHEL / SUSE / Azure Linux family",
+# Validation-state display order + titles for the monthly reminder. The three
+# groups the monthly digest is split into; "unknown" also folds in the
+# not-yet-decided pending_* states (anything without a final supported verdict).
+_STATE_ORDER = ["known_supported", "known_unsupported", "unknown"]
+_STATE_TITLES = {
+    "known_supported": "Known supported",
+    "known_unsupported": "Known unsupported",
+    "unknown": "Unknown (not yet validated)",
 }
 
 
-def _ordered_families(buckets: dict[str, list[dict]]) -> list[str]:
-    known = [f for f in _FAMILY_ORDER if f in buckets]
-    rest = sorted(f for f in buckets if f not in _FAMILY_ORDER)
-    return known + rest
+def _ordered_states(buckets: dict[str, list[dict]]) -> list[str]:
+    # Always show the three canonical states (even when empty), then any extras.
+    extras = sorted(s for s in buckets if s not in _STATE_ORDER)
+    return _STATE_ORDER + extras
 
 
 def _reminder_table_html(distros: list[dict]) -> str:
@@ -143,57 +146,75 @@ def send_monthly_reminder(
     buckets: dict[str, list[dict]],
     recipients: Iterable[str] | None = None,
 ) -> None:
-    """Monthly reminder: every tracked distro release, grouped by package family.
+    """Monthly reminder: every tracked distro release, grouped by validation state.
 
-    Sent at most once per calendar month (on the first scan of the month with no
-    new releases), so the daily "nothing new" runs stay silent while the team
-    still gets a periodic snapshot of everything being tracked.
+    Three groups — known_supported / known_unsupported / unknown (the last also
+    folds in the not-yet-decided pending_* states). ``buckets`` maps each state
+    key to a distro-rollup list (one entry per OS release, with its latest
+    version, contributing publishers and SKU count). Sent at most once per
+    calendar month (on the first scan of the month), so the daily "nothing new"
+    runs stay silent while the team still gets a periodic snapshot of everything
+    tracked, by category.
     """
     recipients = list(recipients or config.NOTIFY_RECIPIENTS)
     if not recipients:
         logger.warning("No recipients configured — skipping notification.")
         return
 
-    families = _ordered_families(buckets)
-    total_distros = sum(len(buckets[f]) for f in families)
-    total_skus = sum(d.get("sku_count", 0) for f in families for d in buckets[f])
+    states = _ordered_states(buckets)
+    total_distros = sum(len(buckets.get(s, [])) for s in states)
+    total_skus = sum(d.get("sku_count", 0) for s in states for d in buckets.get(s, []))
+    counts = {s: len(buckets.get(s, [])) for s in _STATE_ORDER}
 
     subject = (
-        f"[AzFilesAutoPackager] Monthly reminder: {total_distros} distro release(s) tracked"
+        f"[AzFilesAutoPackager] Monthly reminder: "
+        f"{counts['known_supported']} supported, "
+        f"{counts['known_unsupported']} unsupported, "
+        f"{counts['unknown']} unknown"
     )
 
     plain_parts = [
         f"Monthly snapshot of all distro releases tracked by AzFilesAutoPackager "
-        f"({total_distros} release(s) across {total_skus} SKU(s)):",
+        f"({total_distros} release(s) across {total_skus} SKU(s)), grouped by AzNFS "
+        f"validation state:",
         "",
     ]
-    for fam in families:
-        plain_parts.append(f"[{fam}]")
-        for d in buckets[fam]:
-            plain_parts.append(
-                f"  - {d.get('distro_label')} "
-                f"(latest {d.get('version')}; {_fmt(d.get('publishers', []))}; "
-                f"{d.get('sku_count')} SKU(s))"
-            )
+    for st in states:
+        rows = buckets.get(st, [])
+        plain_parts.append(f"[{_STATE_TITLES.get(st, st)}] ({len(rows)})")
+        if rows:
+            for d in rows:
+                plain_parts.append(
+                    f"  - {d.get('distro_label')} "
+                    f"(latest {d.get('version')}; {_fmt(d.get('publishers', []))}; "
+                    f"{d.get('sku_count')} SKU(s))"
+                )
+        else:
+            plain_parts.append("  (none)")
         plain_parts.append("")
     plain = "\n".join(plain_parts)
 
     sections = ""
-    for fam in families:
-        title = _FAMILY_TITLES.get(fam, fam)
+    for st in states:
+        rows = buckets.get(st, [])
+        title = _STATE_TITLES.get(st, st)
         sections += (
             f"<h4 style='font-family:Segoe UI,sans-serif;margin:12px 0 4px'>"
             f"{html.escape(title)} "
-            f"<span style='color:#888;font-weight:normal'>({len(buckets[fam])})</span></h4>"
-            f"{_reminder_table_html(buckets[fam])}"
+            f"<span style='color:#888;font-weight:normal'>({len(rows)})</span></h4>"
+            + (
+                _reminder_table_html(rows)
+                if rows
+                else "<p style='font-family:Segoe UI,sans-serif;color:#888'>(none)</p>"
+            )
         )
     html_body = (
         f"<h3 style='font-family:Segoe UI,sans-serif'>Monthly distro tracking reminder "
         f"<span style='color:#888;font-weight:normal'>({total_distros})</span></h3>"
         f"<p style='font-family:Segoe UI,sans-serif;color:#555'>"
         f"All distro releases currently tracked by AzFilesAutoPackager, grouped by "
-        f"package family. This is a once-a-month snapshot — daily scans with nothing "
-        f"new stay silent.</p>"
+        f"AzNFS validation state. This is a once-a-month snapshot — daily scans with "
+        f"nothing new stay silent.</p>"
         f"{sections}"
     )
 
