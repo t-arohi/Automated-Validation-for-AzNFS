@@ -235,3 +235,179 @@ def _send(subject: str, plain: str, html_body: str, recipients: list[str]) -> No
     except Exception as exc:
         # Never let a notification failure crash the scan.
         logger.error("Failed to send notification: %s", exc)
+
+
+# ===========================================================================
+# Phase 2 (PMC prod validation) notifications
+# ===========================================================================
+# Reuses the ACS email path (`_send`) for the team and the run summary, and a
+# webhook for pre-flight ping / ops paging. Per the orchestrator's design we
+# send one message per *actionable failure* and exactly one run summary; the
+# successfully-published / already-published images are reported only in the
+# summary (no per-image chatter).
+
+def notify(
+    subject: str,
+    plain: str,
+    html_body: str | None = None,
+    recipients: Iterable[str] | None = None,
+) -> None:
+    """Generic e-mail helper (used by the Phase 2 / Phase 3 functions below)."""
+    recipients = list(recipients or config.NOTIFY_RECIPIENTS)
+    if not recipients:
+        logger.warning("No recipients configured — skipping notification.")
+        return
+    body = html_body or f"<pre style='font-family:Consolas,monospace'>{html.escape(plain)}</pre>"
+    _send(subject, plain, body, recipients)
+
+
+def notifications_ready() -> tuple[bool, str]:
+    """True when the ACS e-mail channel is fully configured.
+
+    Pre-flight uses this instead of sending a probe e-mail: if endpoint, sender
+    or recipients are missing, actionable failures could not be delivered, so
+    the run aborts (and page_ops still best-effort e-mails the abort reason).
+    """
+    missing = []
+    if not config.ACS_ENDPOINT:
+        missing.append("ACS_ENDPOINT")
+    if not config.ACS_SENDER:
+        missing.append("ACS_SENDER")
+    if not config.NOTIFY_RECIPIENTS:
+        missing.append("NOTIFY_RECIPIENTS")
+    if missing:
+        return False, "missing " + ", ".join(missing)
+    return True, ""
+
+
+def send_phase2_failure(
+    distro_label: str,
+    detail: str,
+    recipients: Iterable[str] | None = None,
+) -> None:
+    """One actionable-failure notice (a gate marked the release known_unsupported).
+
+    ``detail`` is the gate's human-actionable message (what a human must do to
+    unblock the release).
+    """
+    subject = f"[AzNFS Phase 2] action needed: {distro_label}"
+    plain = f"{distro_label}: {detail}"
+    notify(subject, plain, recipients=recipients)
+
+
+def send_phase2_pending_publish(
+    distro_label: str,
+    detail: str,
+    recipients: Iterable[str] | None = None,
+) -> None:
+    """The prod repo exists but no AzNFS package is published for this release yet.
+
+    Asks a human to publish the package manually; Phase 2 re-checks the release
+    on its next run (the row is parked ``pending_publish`` in the DB), so no
+    further action is needed here once the package appears on prod.
+    """
+    subject = f"[AzNFS Phase 2] publish needed: {distro_label}"
+    plain = f"{distro_label}: {detail}"
+    notify(subject, plain, recipients=recipients)
+
+
+def send_phase2_trusted(
+    distro_label: str,
+    download_url: str | None = None,
+    version: str | None = None,
+    recipients: Iterable[str] | None = None,
+) -> None:
+    """Gate 3: the latest prod AzNFS version is already validated -- trusted.
+
+    Includes the distro, the validated AzNFS version and the prod download URL
+    so a human can locate the package straight from the mail.
+    """
+    subject = f"[AzNFS Phase 2] already validated (trusted): {distro_label}"
+    lines = [f"{distro_label}: AzNFS is already validated on PMC prod -- trusted."]
+    if version:
+        lines.append(f"Version: {version}")
+    if download_url:
+        lines.append(f"Download (prod): {download_url}")
+    notify(subject, "\n".join(lines), recipients=recipients)
+
+
+def send_phase2_summary(
+    processed: int,
+    unsupported: list[tuple[str, str]] | None = None,
+    pending_publish: list[tuple[str, str]] | None = None,
+    to_phase3: list[str] | None = None,
+    trusted: list[str] | None = None,
+    skipped: int = 0,
+    errors: list[tuple[str, str]] | None = None,
+    recipients: Iterable[str] | None = None,
+) -> None:
+    """The single end-of-run summary.
+
+    ``unsupported`` / ``pending_publish`` / ``errors`` are lists of
+    ``(distro_label, reason)``; ``to_phase3`` is the list of distro_labels handed
+    to Phase 3 for validation; ``trusted`` is the list already validated on prod
+    (Phase 3 skipped).
+    """
+    unsupported = unsupported or []
+    pending_publish = pending_publish or []
+    to_phase3 = to_phase3 or []
+    trusted = trusted or []
+    errors = errors or []
+
+    subject = (
+        f"[AzNFS Phase 2] run summary: {len(to_phase3)} to Phase 3, "
+        f"{len(trusted)} trusted, {len(pending_publish)} pending publish, "
+        f"{len(unsupported)} unsupported"
+    )
+
+    def _lines(items):
+        return "\n".join(f"  - {lbl}: {reason}" for lbl, reason in items) or "  (none)"
+
+    plain = (
+        f"Phase 2 processed {processed} image(s).\n\n"
+        f"Handed to Phase 3 ({len(to_phase3)}):\n"
+        + ("\n".join(f"  - {lbl}" for lbl in to_phase3) or "  (none)")
+        + f"\n\nAlready validated on prod, trusted (Phase 3 skipped) ({len(trusted)}):\n"
+        + ("\n".join(f"  - {lbl}" for lbl in trusted) or "  (none)")
+        + f"\n\nPending manual publish ({len(pending_publish)}):\n{_lines(pending_publish)}"
+        + f"\n\nMarked unsupported ({len(unsupported)}):\n{_lines(unsupported)}"
+        + (f"\n\nSkipped (family/label mismatch): {skipped}" if skipped else "")
+        + (f"\n\nOrchestrator errors ({len(errors)}):\n{_lines(errors)}" if errors else "")
+    )
+    notify(subject, plain, recipients=recipients)
+
+
+def post_webhook(url: str | None, text: str, timeout: int = 15) -> bool:
+    """POST a simple ``{"text": ...}`` payload to a webhook. Returns success.
+
+    Used for the pre-flight reachability ping. Never raises — a webhook problem
+    is reported via the return value so the caller can decide.
+    """
+    if not url:
+        logger.warning("No webhook URL configured — skipping webhook post.")
+        return False
+    try:
+        import requests  # local import: keeps Phase 1's import surface unchanged
+        resp = requests.post(url, json={"text": text}, timeout=timeout)
+        if not resp.ok:
+            logger.error("Webhook POST -> %s", resp.status_code)
+            return False
+        return True
+    except Exception as exc:  # pragma: no cover - network/dep guard
+        logger.error("Webhook POST failed: %s", exc)
+        return False
+
+
+def page_ops(reason: str, target: str | None = None, timeout: int = 15) -> bool:
+    """Page ops on a pre-flight abort (whole-run failure).
+
+    Posts to the ops ``target`` webhook and also e-mails the team as a durable
+    record. Returns whether the webhook page was delivered.
+    """
+    text = f"[AzNFS Phase 2 PRE-FLIGHT ABORT] {reason}"
+    posted = post_webhook(target, text, timeout=timeout) if target else False
+    try:
+        notify("[AzNFS Phase 2] PRE-FLIGHT ABORT", text)
+    except Exception as exc:  # pragma: no cover - email is a best-effort record
+        logger.error("page_ops e-mail failed: %s", exc)
+    return posted

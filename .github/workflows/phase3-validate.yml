@@ -1,0 +1,146 @@
+name: Phase 3 - Validate AzNFS with LISA
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+on:
+  # Run automatically after Phase 2 finishes (it produces lisa_jobs.json).
+  # `workflow_run` only fires for workflow files on the default branch.
+  workflow_run:
+    workflows: ["Phase 2 - Validate against PMC prod"]
+    types: [completed]
+  workflow_dispatch:
+    # Manual trigger: re-run validation against the latest Phase 2 hand-off.
+
+# IMPORTANT: shared with Phase 2. Phase 2 AND Phase 3 both mutate the same
+# marketplace.db cache, so they MUST serialize under ONE concurrency group to
+# avoid clobbering each other's writes (last-writer-wins on the cache).
+concurrency:
+  group: marketplace-db
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    # When triggered by Phase 2, only proceed if Phase 2 actually succeeded.
+    # (A manual workflow_dispatch has no upstream conclusion, so allow it too.)
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          github.event.workflow_run.conclusion == 'success' }}
+    runs-on:
+      - self-hosted
+      - azure-vm-marketplace
+
+    steps:
+      # ----------------------------------------------------------------
+      # 1. Checkout source
+      # ----------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------
+      # 2. Restore the shared SQLite DB (most recent, via the prefix key).
+      #    Phase 3 updates each validated distro's row, then re-saves the
+      #    cache under the same prefix so the next run sees it.
+      # ----------------------------------------------------------------
+      - name: Restore database cache
+        uses: actions/cache/restore@v4
+        with:
+          path: marketplace.db
+          key: marketplace-db-v2-${{ github.run_id }}
+          restore-keys: |
+            marketplace-db-v2-
+
+      # ----------------------------------------------------------------
+      # 3. Fetch Phase 2's hand-off (lisa_jobs.json).
+      #    On workflow_run we pull the artifact the triggering Phase 2 run
+      #    uploaded; on manual dispatch we fall back to the most recent
+      #    successful Phase 2 run's artifact.
+      # ----------------------------------------------------------------
+      - name: Download Phase 2 output (from triggering run)
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: lisa-jobs-${{ github.event.workflow_run.run_number }}
+          path: output
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          merge-multiple: true
+
+      - name: Download latest Phase 2 output (manual dispatch)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: phase2-publish.yml
+          workflow_conclusion: success
+          name_is_regexp: true
+          name: lisa-jobs-.*
+          path: output
+          if_no_artifact_found: fail
+
+      # ----------------------------------------------------------------
+      # 4. Ensure the LISA engine is installed on the runner (idempotent).
+      #    First run does the full apt + clone + pip install (~minutes); later
+      #    runs are a no-op fast-path when the venv already exists. Skip the
+      #    bootstrap entirely by pre-installing LISA and setting LISA_VENV.
+      # ----------------------------------------------------------------
+      - name: Ensure LISA engine
+        env:
+          LISA_VENV: ${{ vars.LISA_VENV }}
+        run: |
+          set -euo pipefail
+          VENV="${LISA_VENV:-$HOME/lisa-venv}"
+          if [ -x "$VENV/bin/lisa" ] || [ -x "$VENV/bin/python" ] && "$VENV/bin/lisa" --help >/dev/null 2>&1; then
+            echo "LISA already present at $VENV; skipping bootstrap."
+          else
+            echo "LISA not found at $VENV; running phase3/setup_lisa.sh..."
+            LISA_VENV="$VENV" bash phase3/setup_lisa.sh
+          fi
+
+      # ----------------------------------------------------------------
+      # 5. Run the Phase 3 driver: per-distro LISA validation, then record
+      #    each verdict in the DB and send ONE summary e-mail.
+      #
+      #    The runner's system managed identity must be able to create test VMs.
+      # ----------------------------------------------------------------
+      - name: Run Phase 3 validation
+        env:
+          # scripts/ holds notifier.py + config.py (the ACS e-mail path, shared
+          # with Phase 1/2). Phase 3's summary mail goes through notifier.notify.
+          PYTHONPATH: scripts
+          # --- Azure creds for the ACS e-mail notifier (shared with Phase 1/2) ---
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_MANAGED_IDENTITY_CLIENT_ID: ${{ vars.AZURE_MANAGED_IDENTITY_CLIENT_ID }}
+          ACS_ENDPOINT: ${{ vars.ACS_ENDPOINT }}
+          ACS_SENDER: ${{ vars.ACS_SENDER }}
+          NOTIFY_RECIPIENTS: ${{ vars.NOTIFY_RECIPIENTS }}
+          # --- Shared DB ---
+          DB_PATH: marketplace.db
+          # --- LISA parallelism (bounded by the subscription's regional vCPU quota) ---
+          LISA_VENV: ${{ vars.LISA_VENV }}
+          PHASE3_CONCURRENCY: ${{ vars.PHASE3_CONCURRENCY }}
+          PHASE3_MAX_PARALLEL_DISTROS: ${{ vars.PHASE3_MAX_PARALLEL_DISTROS }}
+        run: |
+          set -euo pipefail
+          # No jobs file (e.g. Phase 2 emitted none) -> nothing to validate.
+          if [ ! -s output/lisa_jobs.json ]; then
+            echo "No output/lisa_jobs.json from Phase 2; nothing to validate."
+            exit 0
+          fi
+          # Activate the LISA engine venv (path overridable via LISA_VENV).
+          source "${LISA_VENV:-$HOME/lisa-venv}/bin/activate"
+          # Refresh Azure auth for VM provisioning via the runner's identity.
+          az login --identity --allow-no-subscriptions >/dev/null
+          python -m phase3.run_phase3 output/lisa_jobs.json \
+            --subscription-id "${AZURE_SUBSCRIPTION_ID}" \
+            --concurrency "${PHASE3_CONCURRENCY:-3}" \
+            --max-parallel-distros "${PHASE3_MAX_PARALLEL_DISTROS:-1}"
+
+      # ----------------------------------------------------------------
+      # 6. Persist the DB (validated-state updates) for the next run.
+      # ----------------------------------------------------------------
+      - name: Save database cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: marketplace.db
+          key: marketplace-db-v2-${{ github.run_id }}

@@ -1,0 +1,135 @@
+# Phase 3 - AzNFS package validation runbook.
+#
+# Runs the AzNfsValidation suite (install lifecycle, NFS mount + simple I/O,
+# and basic watchdog resilience) against a single marketplace image.
+#
+# Example:
+#   lisa -r runbooks/aznfs_validation.yml \
+#     -v subscription_id:<sub> \
+#     -v marketplace_image:"RedHat:RHEL:9_5:latest" \
+#     -v aznfs_package_url:"https://packages.microsoft.com/rhel/9.0/prod/Packages/a/aznfs-0.3.458-1.x86_64.rpm" \
+#     -v aznfs_expected_version:"0.3.458"
+name: "AzNFS-Phase3-Validation"
+# How many environments (VMs) run at once. Each case uses its own fresh VM, so
+# this many cases/distros validate in parallel - wall-clock collapses to ~the
+# slowest single case instead of the sum.
+#
+# PARALLELISM REQUIRES AN UN-PINNED RESOURCE GROUP. LISA uses a single fixed ARM
+# deployment name and one SSH key file *per resource group*, so two environments
+# sharing one pinned RG collide (DeploymentActive / SSH-key race). With
+# resource_group_name left empty (the default below), LISA creates one RG per
+# environment - each with its own VNet, deployment and key - so they run
+# independently. Keep concurrency at 1 only if you pin resource_group_name.
+concurrency: $(concurrency)
+# Discover the test suite from THIS repo (path is relative to this runbook):
+# phase3/runbooks/aznfs_validation.yml -> ../testsuites = phase3/testsuites.
+# LISA itself is installed in the venv; only the test code is loaded from here.
+extension:
+  - "../testsuites"
+variable:
+  # --- Azure / platform ---
+  - name: subscription_id
+    value: ""
+  - name: location
+    value: "centralindia"
+  # Empty => LISA creates a fresh RG per environment (REQUIRED for concurrency>1;
+  # each env gets its own RG/VNet/NSG/key, auto-deleted when keep_environment=no).
+  # Set to a name to pin all envs into one existing RG (forces concurrency=1, and
+  # reuses that RG's VNet). Pin only when you must use a specific pre-made network.
+  - name: resource_group_name
+    value: ""
+  - name: marketplace_image
+    value: "RedHat:RHEL:9_5:latest"
+  - name: vm_size
+    value: ""
+  - name: auth_type
+    value: "default"
+  - name: admin_private_key_file
+    value: ""
+    is_secret: true
+  - name: azure_arm_access_token
+    value: ""
+    is_secret: true
+  # true: VM gets a public IP so a dev box / WSL runner can SSH in (local runs).
+  # Set to false for automation on a runner that shares the VM's VNet.
+  - name: use_public_ips
+    value: true
+  # The NSG SSH (port 22) allow-rule is locked to this source IP. LISA auto-
+  # detects the runner's public IP if left empty, but the NSG persists across
+  # runs in the pinned resource group, so a stale rule can block you when your
+  # IP changes. Pass your CURRENT public IP here, e.g.
+  #   -v source_address_prefix:$(curl -s https://api.ipify.org)
+  - name: source_address_prefix
+    value: ""
+  - name: keep_environment
+    value: "no"
+  # Environments to run at once. Works with the default empty resource_group_name
+  # (one RG per env). Bounded by your subscription's vCPU quota in the region
+  # (each VM here is 2 vCPUs). Set to 1 if you pin resource_group_name.
+  - name: concurrency
+    value: 3
+  # Select which case(s) to run. The `name` criteria is a regex fullmatch, so
+  # the default ".*" runs all three; pass a full case name to run just one,
+  # e.g. -v case_name:verify_aznfs_install_lifecycle
+  - name: case_name
+    value: "verify_aznfs.*"
+
+  # --- AzNFS package validation inputs (read by the test suite) ---
+  # Primary install source: the PMC prod download URL Phase 2 produces. If empty,
+  # the suite falls back to the PMC repo defined by aznfs_pmc_repo.
+  - name: aznfs_package_url
+    value: ""
+    is_case_visible: true
+  - name: aznfs_pmc_repo
+    value: ""
+    is_case_visible: true
+  # Optional: assert the installed/published version (e.g. "0.3.2").
+  - name: aznfs_expected_version
+    value: ""
+    is_case_visible: true
+  # Mount configuration (confirm exact values with the team).
+  - name: aznfs_mount_type
+    value: "aznfs"
+    is_case_visible: true
+  - name: aznfs_mount_opts
+    value: "vers=4,minorversion=1,sec=sys"
+    is_case_visible: true
+  # Leave empty to skip the EIT mount variant until the exact option is known.
+  - name: aznfs_eit_mount_opts
+    value: ""
+    is_case_visible: true
+
+notifier:
+  - type: console
+  - type: html
+  # Machine-readable results for automation: the driver parses this XML to map
+  # each case (and, with the batch combinator, each distro) to PASSED/FAILED.
+  # append_message_id keeps per-combinator-item case names distinct.
+  - type: junit
+    path: lisa.junit.xml
+
+platform:
+  - type: azure
+    admin_private_key_file: $(admin_private_key_file)
+    keep_environment: $(keep_environment)
+    azure:
+      use_public_address: $(use_public_ips)
+      source_address_prefixes: $(source_address_prefix)
+      credential:
+        type: $(auth_type)
+        token: $(azure_arm_access_token)
+      resource_group_name: $(resource_group_name)
+      subscription_id: $(subscription_id)
+    requirement:
+      core_count: 2
+      azure:
+        marketplace: $(marketplace_image)
+        location: $(location)
+        vm_size: $(vm_size)
+        osdisk_size_in_gb: 64
+
+testcase:
+  - criteria:
+      # Name match is a regex/substring: the default "verify_aznfs" matches all
+      # three cases; pass a full case name to run just one.
+      name: $(case_name)

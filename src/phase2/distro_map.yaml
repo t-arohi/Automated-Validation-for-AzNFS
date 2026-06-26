@@ -1,0 +1,42 @@
+# PMC PROD is version-indexed:  https://packages.microsoft.com/<distro>/<version>/prod/
+#
+# Phase 2 no longer regex-matches onboarding repo names (microsoft-ubuntu-jammy
+# -prod, ...). It builds the URL straight from the image's distro_label, e.g.
+#   "Ubuntu 22.04" -> https://packages.microsoft.com/ubuntu/22.04/prod/
+#   "RHEL 9.8"     -> https://packages.microsoft.com/rhel/9/prod/   (9.8 -> 9 fallback)
+# so no codename (jammy/noble) mapping is needed.
+#
+# This file maps a marketplace publisher and/or a distro_label keyword to its
+# PMC <distro> path segment and package index kind (apt|yum). It is data-only;
+# adding a distro is a config change here, not a code change.
+
+# publisher (lower-case) -> { distro segment, index }. Used as the fallback when
+# no `labels` keyword below matches.
+publishers:
+  canonical: {distro: ubuntu, index: apt}
+  debian:    {distro: debian, index: apt}
+  redhat:    {distro: rhel,   index: yum}
+  suse:      {distro: sles,   index: yum}
+  microsoft: {distro: azurelinux, index: yum}
+
+# distro_label keyword -> [segment, index]. Checked FIRST (first substring match
+# wins), so openSUSE / CentOS / Alma / Rocky / Mariner resolve correctly even
+# when the marketplace publisher is generic. Order matters.
+labels:
+  - [ubuntu,        ubuntu,      apt]
+  - [debian,        debian,      apt]
+  - ["red hat",     rhel,        yum]
+  - [redhat,        rhel,        yum]
+  - [rhel,          rhel,        yum]
+  - [centos,        centos,      yum]
+  - [opensuse,      opensuse,    yum]
+  - [sles,          sles,        yum]
+  - [almalinux,     alma,        yum]
+  - [alma,          alma,        yum]
+  - [rocky,         rocky,       yum]
+  - [fedora,        fedora,      yum]
+  - ["cbl-mariner", cbl-mariner, yum]
+  - [mariner,       cbl-mariner, yum]
+  - ["azure linux", azurelinux,  yum]
+  - [azurelinux,    azurelinux,  yum]
+  - [amazon,        amazonlinux, yum]

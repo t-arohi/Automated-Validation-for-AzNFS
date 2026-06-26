@@ -21,6 +21,16 @@ NEW = "new"
 UPDATED = "updated"
 UNCHANGED = "unchanged"
 
+# Phase 2 validation states written back to the `validated` column.
+KNOWN_SUPPORTED = "known_supported"
+KNOWN_UNSUPPORTED = "known_unsupported"
+PENDING_PUBLISH = "pending_publish"        # prod repo exists, package not yet published (retried)
+PENDING_VALIDATION = "pending_validation"  # package found, LISA job emitted, awaiting Phase 3
+UNKNOWN = "unknown"
+_VALID_STATES = {
+    KNOWN_SUPPORTED, KNOWN_UNSUPPORTED, PENDING_PUBLISH, PENDING_VALIDATION, UNKNOWN,
+}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -44,6 +54,8 @@ def _lazy_migrate(conn: sqlite3.Connection) -> None:
         adds.append("ALTER TABLE images ADD COLUMN family TEXT NOT NULL DEFAULT 'unknown'")
     if "distro_label" not in cols:
         adds.append("ALTER TABLE images ADD COLUMN distro_label TEXT NOT NULL DEFAULT ''")
+    if "last_validated_version" not in cols:
+        adds.append("ALTER TABLE images ADD COLUMN last_validated_version TEXT NOT NULL DEFAULT ''")
     if adds:
         logger.warning(
             "Legacy schema detected — adding new columns. "
@@ -193,12 +205,128 @@ def get_image_record(
         conn.close()
 
 
+def set_validation_state(
+    db_path: str,
+    identity: tuple[str, str, str, str, str],
+    state: str,
+    last_validated_version: str | None = None,
+) -> bool:
+    """Phase 2/3: update the validation verdict for one image row.
+
+    identity is the full row identity tuple
+    (publisher, image, sku, region, architecture) — the same key used by
+    check_and_upsert / get_image_record. ``state`` must be one of
+    'known_supported', 'known_unsupported', 'pending_publish',
+    'pending_validation', 'unknown'. The human-actionable reason for a
+    known_unsupported verdict is delivered by e-mail, not stored here.
+
+    ``last_validated_version`` is the AzNFS version a successful Phase 3 run
+    just validated on prod; when given it is recorded so the next Phase 2 run
+    can skip re-validating the same version. Leave it None to preserve the
+    stored value. All other Phase 1 columns are preserved.
+
+    Returns True if a row was updated, False if no matching row exists.
+    """
+    if state not in _VALID_STATES:
+        raise ValueError(
+            f"invalid validation state {state!r}; expected one of {sorted(_VALID_STATES)}"
+        )
+    publisher, image, sku, region, architecture = identity
+    now = _now_iso()
+    conn = _connect(db_path)
+    try:
+        if last_validated_version is None:
+            cur = conn.execute(
+                """
+                UPDATE images
+                   SET validated    = ?,
+                       last_checked = ?
+                 WHERE publisher    = ?
+                   AND image        = ?
+                   AND sku          = ?
+                   AND region       = ?
+                   AND architecture = ?
+                """,
+                (state, now, publisher, image, sku, region, architecture),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE images
+                   SET validated              = ?,
+                       last_validated_version = ?,
+                       last_checked           = ?
+                 WHERE publisher    = ?
+                   AND image        = ?
+                   AND sku          = ?
+                   AND region       = ?
+                   AND architecture = ?
+                """,
+                (state, last_validated_version, now,
+                 publisher, image, sku, region, architecture),
+            )
+        conn.commit()
+        if cur.rowcount == 0:
+            logger.warning(
+                "set_validation_state: no row for %s / %s / %s [%s, %s]",
+                publisher, image, sku, region, architecture,
+            )
+            return False
+        logger.info(
+            "Validation state: %s / %s / %s [%s, %s] -> %s",
+            publisher, image, sku, region, architecture, state,
+        )
+        return True
+    finally:
+        conn.close()
+
+
 def get_all_records(db_path: str) -> list[dict]:
     """Return every tracked image row as a list of dicts (for the distro rollup)."""
     conn = _connect(db_path)
     try:
         rows = conn.execute(
             "SELECT * FROM images ORDER BY publisher, distro_label, sku"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_rows_by_state(db_path: str, state: str) -> list[dict]:
+    """Return all image rows currently in a given ``validated`` state.
+
+    Phase 2 uses this to rebuild its work queue: rows parked in
+    'pending_publish' on a previous run are re-processed (re-checked against
+    prod) on the next run, even if Phase 1 did not re-emit them in
+    needs_validation.json. This is what lets a distro that was waiting on a
+    manual publish flow back into lisa_jobs.json once the package appears.
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM images WHERE validated = ? ORDER BY publisher, distro_label, sku",
+            (state,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_records_since(db_path: str, since_iso: str) -> list[dict]:
+    """Return image rows first seen (``date_added``) on/after ``since_iso``.
+
+    ``since_iso`` must be an ISO8601 UTC string in the SAME format as the stored
+    ``date_added`` (e.g. '2026-06-01T00:00:00Z'); same-format ISO8601 strings
+    compare correctly with a plain lexicographic ``>=``. Used by the monthly
+    digest to report the releases first seen within a trailing window.
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM images WHERE date_added >= ? "
+            "ORDER BY publisher, distro_label, sku",
+            (since_iso,),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:

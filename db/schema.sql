@@ -23,8 +23,16 @@ CREATE TABLE IF NOT EXISTS images (
     last_checked  TEXT    NOT NULL,   -- ISO8601 UTC, updated on every scan run
     validated     TEXT    NOT NULL DEFAULT 'unknown',
                                       -- unknown           : not yet handed to Phase 2/3
+                                      -- pending_publish   : prod repo exists but no AzNFS package yet;
+                                      --                     team must publish manually (retried each run)
+                                      -- pending_validation: package found, LISA job emitted, awaiting Phase 3
                                       -- known_supported   : passed Phase 3 LISA test cases
-                                      -- known_unsupported : failed at some phase (see `reason`)
+                                      -- known_unsupported : failed at some phase (reason e-mailed)
+    last_validated_version TEXT NOT NULL DEFAULT '',
+                                      -- AzNFS version Phase 3 last validated on prod (e.g. '0.3.46');
+                                      -- empty = never validated. Phase 2 compares the numeric-latest
+                                      -- published prod version against this to decide if (re)validation
+                                      -- is needed. Compare NUMERICALLY, never as strings.
     UNIQUE(publisher, image, sku, region, architecture)
 );
 

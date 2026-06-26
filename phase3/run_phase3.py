@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""
+Phase 3 automation driver.
+
+Turns Phase 2 output into Phase 3 outcomes with no human in the loop:
+
+    phase2 jobs.json  ->  [ run LISA per distro ]  ->  parse pass/fail
+                                                          |
+                                                          v
+                                      record_result.run()  (DB update +
+                                      one summary e-mail)
+
+It is deliberately thin: all the real logic already lives in the LISA suite
+(provision + install + validate) and in ``orchestrator/record_result.py`` (the
+post-validation DB update + summary e-mail). This script only sequences them.
+
+INPUT  - a Phase 2 JSON file (lisa_jobs.json): a list of distro jobs, each with
+         the marketplace image identity, the published PMC prod package URL +
+         version, and an arch. Example item:
+           {
+             "publisher": "redhat", "image": "rhel", "sku": "9_5",
+             "version": "latest", "region": "centralindia",
+             "arch": "x86_64", "distro_label": "RHEL 9.5",
+             "aznfs_package_url": "https://.../aznfs-0.3.458-1.x86_64.rpm",
+             "aznfs_version": "0.3.458"
+           }
+
+FLOW
+  1. For each distro, run the base runbook with ``-v`` overrides (3 cases in
+     parallel via ``concurrency:3``; each case in its own auto-deleted RG).
+  2. Read that run's ``lisa.junit.xml`` (the junit notifier) -> the distro is
+     "passed" when it has at least one case and zero failed cases; on a failure
+     the failing ``[Tier N: step]`` tag is extracted.
+  3. Hand the pass/fail results to ``record_result.run()`` which records each
+     verdict in the DB and sends one summary e-mail.
+
+Distro-level parallelism is controlled by ``--max-parallel-distros`` (each
+distro itself already runs its 3 cases in parallel). Bound it by your vCPU
+quota: VMs in flight ~= max_parallel_distros * 3 * 2 vCPUs.
+"""
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import logging
+import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import List, Tuple
+
+# Reuse the orchestrator's job model + DB/notify logic.
+from .orchestrator import record_result
+from .orchestrator.record_result import LisaJob
+
+logger = logging.getLogger("phase3.driver")
+
+_HERE = Path(__file__).resolve().parent
+_BASE_RUNBOOK = _HERE / "runbooks" / "aznfs_validation.yml"
+_RUN_LOG_RE = re.compile(r"run log path:\s*(\S+)")
+# A test asserts with a "[Tier N: step]" prefix so a failure can be blamed on the
+# exact stage (artifact / install / footprint / mount / io / watchdog).
+_TIER_RE = re.compile(r"\[Tier \d[^\]]*\]")
+
+
+def _overrides(job: LisaJob, subscription_id: str, concurrency: int) -> List[str]:
+    """Build the ``-v key:value`` arguments for one distro's LISA run."""
+    image = f"{job.publisher} {job.image} {job.sku} {job.version}"
+    pairs = {
+        "subscription_id": subscription_id,
+        "marketplace_image": image,
+        "aznfs_package_url": job.aznfs_package_url,
+        "aznfs_expected_version": job.aznfs_version,
+        "keep_environment": "no",
+        "concurrency": str(concurrency),
+        # empty resource_group_name => one auto-deleted RG per environment
+        # (required for concurrency > 1); see the runbook header.
+        "resource_group_name": "",
+    }
+    args: List[str] = []
+    for key, value in pairs.items():
+        args += ["-v", f"{key}:{value}"]
+    return args
+
+
+def _run_lisa(job: LisaJob, subscription_id: str, concurrency: int) -> Path:
+    """Run LISA for one distro; return the path to that run's junit XML.
+
+    The run log path is parsed from LISA's stdout, so concurrent distro runs
+    never confuse each other's results (no "newest dir" guessing).
+    """
+    cmd = ["lisa", "run", "-r", str(_BASE_RUNBOOK)] + _overrides(
+        job, subscription_id, concurrency
+    )
+    logger.info("[%s] starting LISA: %s", job.distro_label, " ".join(cmd))
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, check=False
+    )
+    match = _RUN_LOG_RE.search(proc.stdout)
+    if not match:
+        raise RuntimeError(
+            f"could not find run log path in LISA output for {job.distro_label}"
+        )
+    return Path(match.group(1)) / "lisa.junit.xml"
+
+
+def _parse_junit(xml_path: Path) -> Tuple[int, int, int, str]:
+    """Return (total, failed, skipped, reason) case counts from a junit report.
+
+    ``reason`` summarizes the failed case(s) so the driver can report WHICH tier
+    failed. When a test's ``[Tier N: step]`` tag is present in the failure
+    message it is used verbatim (it already names the failing stage); otherwise
+    the LISA case name is used.
+    """
+    root = ET.parse(xml_path).getroot()
+    suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+    total = failed = skipped = 0
+    reasons: List[str] = []
+    for suite in suites:
+        total += int(suite.get("tests", 0))
+        failed += int(suite.get("failures", 0)) + int(suite.get("errors", 0))
+        skipped += int(suite.get("skipped", 0))
+        for case in suite.findall("testcase"):
+            problem = case.find("failure")
+            if problem is None:
+                problem = case.find("error")
+            if problem is None:
+                continue
+            raw = (problem.get("message") or problem.text or "").strip()
+            first = raw.splitlines()[0].strip() if raw else "failed"
+            if _TIER_RE.search(first):
+                reasons.append(first)  # already starts with "[Tier N: step] ..."
+            else:
+                reasons.append(f"{case.get('name') or 'case'}: {first}")
+    return total, failed, skipped, "; ".join(reasons)
+
+
+def _validate_one(
+    job: LisaJob, subscription_id: str, concurrency: int
+) -> LisaJob:
+    """Run + score one distro, setting ``job.lisa_passed`` and, on failure,
+    ``job.failure_reason`` (the failing tier/step for the summary e-mail)."""
+    try:
+        junit = _run_lisa(job, subscription_id, concurrency)
+        total, failed, skipped, reason = _parse_junit(junit)
+        ran = total - skipped
+        job.lisa_passed = ran > 0 and failed == 0
+        if not job.lisa_passed:
+            job.failure_reason = reason or (
+                "no test cases ran (all skipped or environment failed)"
+            )
+        logger.info(
+            "[%s] total=%d failed=%d skipped=%d -> %s%s",
+            job.distro_label, total, failed, skipped,
+            "PASSED" if job.lisa_passed else "FAILED",
+            "" if job.lisa_passed else f" ({job.failure_reason})",
+        )
+    except Exception as exc:  # an infra/driver error is a non-pass for safety
+        job.lisa_passed = False
+        job.failure_reason = f"driver/infra error: {exc}"
+        logger.error("[%s] LISA run errored: %s", job.distro_label, exc)
+    return job
+
+
+def validate_distros(
+    jobs: List[LisaJob],
+    subscription_id: str,
+    concurrency: int,
+    max_parallel_distros: int,
+) -> List[LisaJob]:
+    """Run LISA for every distro (distros optionally in parallel)."""
+    if max_parallel_distros <= 1:
+        return [_validate_one(j, subscription_id, concurrency) for j in jobs]
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max_parallel_distros
+    ) as pool:
+        futures = [
+            pool.submit(_validate_one, j, subscription_id, concurrency)
+            for j in jobs
+        ]
+        return [f.result() for f in futures]
+
+
+def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+    parser = argparse.ArgumentParser(description="Phase 3 automation driver.")
+    parser.add_argument(
+        "jobs_json", help="Phase 2 output: JSON list of distro jobs."
+    )
+    parser.add_argument(
+        "--subscription-id", required=True, help="Azure subscription id."
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=3,
+        help="Cases in parallel per distro (default 3 = all cases at once).",
+    )
+    parser.add_argument(
+        "--max-parallel-distros", type=int, default=1,
+        help="Distros validated at once (bound by vCPU quota).",
+    )
+    args = parser.parse_args()
+
+    jobs = record_result.load_jobs(args.jobs_json)
+    if not jobs:
+        logger.warning("no jobs in %s; nothing to do.", args.jobs_json)
+        return 0
+
+    logger.info("validating %d distro(s) with LISA...", len(jobs))
+    jobs = validate_distros(
+        jobs, args.subscription_id, args.concurrency,
+        args.max_parallel_distros,
+    )
+
+    # Post-validation: record verdicts in the DB + send ONE summary e-mail.
+    summary = record_result.run(jobs)
+    logger.info("phase 3 complete. states: %s", summary)
+    # Non-zero exit if any distro failed validation, for CI gating.
+    return 0 if all(j.lisa_passed for j in jobs) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

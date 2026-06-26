@@ -1,0 +1,24 @@
+[
+  {
+    "publisher": "redhat",
+    "image": "rhel",
+    "sku": "9_5",
+    "version": "latest",
+    "region": "centralindia",
+    "arch": "x86_64",
+    "distro_label": "RHEL 9.5",
+    "aznfs_package_url": "https://packages.microsoft.com/rhel/9.0/prod/Packages/a/aznfs-0.3.458-1.x86_64.rpm",
+    "aznfs_version": "0.3.458"
+  },
+  {
+    "publisher": "canonical",
+    "image": "0001-com-ubuntu-server-jammy",
+    "sku": "22_04-lts",
+    "version": "latest",
+    "region": "centralindia",
+    "arch": "x86_64",
+    "distro_label": "Ubuntu 22.04",
+    "aznfs_package_url": "https://packages.microsoft.com/ubuntu/22.04/prod/pool/main/a/aznfs/aznfs_0.3.458_amd64.deb",
+    "aznfs_version": "0.3.458"
+  }
+]

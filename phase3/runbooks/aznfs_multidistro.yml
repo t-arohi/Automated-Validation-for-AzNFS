@@ -1,0 +1,40 @@
+# Phase 3 - AzNFS multi-distro validation (parallel).
+#
+# Validates the AzNFS package across several distros AT ONCE. It reuses the base
+# runbook (aznfs_validation.yml - same suite, platform, notifier, variables) via
+# `include`, and adds a `batch` combinator that pairs each distro with its own
+# package URL and expected version. Each batch item x each selected case becomes
+# its own environment; with an empty resource_group_name (inherited from the
+# base) every environment gets its own auto-deleted RG, so they run in parallel
+# up to `concurrency`.
+#
+# Run (set concurrency to how many VMs you want at once; quota permitting):
+#   lisa run -r runbooks/aznfs_multidistro.yml \
+#     -v subscription_id:<sub> -v concurrency:6 -v keep_environment:no
+#
+# Cost note: items x cases = environments. 2 distros x 3 cases = 6 VMs. Set
+# concurrency to that number to run them all simultaneously (~one slow boot of
+# wall-clock instead of the sum).
+name: "AzNFS-Phase3-MultiDistro"
+include:
+  - path: ./aznfs_validation.yml
+
+# Pair each distro with the matching package. The same AzNFS version is
+# published per-distro at family-specific PMC paths (RHEL .rpm, Ubuntu .deb), so
+# we pin one consistent version (0.3.458) across families. URLs verified on
+# packages.microsoft.com. NOTE: AzNFS is NOT published for Debian (no aznfs in
+# .../debian/12/prod/pool/main/a/) - Ubuntu is the Debian-family target.
+# Add more distros by appending items (confirm the URL resolves first).
+combinator:
+  type: batch
+  items:
+    - marketplace_image: "RedHat:RHEL:9_5:latest"
+      aznfs_package_url: "https://packages.microsoft.com/rhel/9.0/prod/Packages/a/aznfs-0.3.458-1.x86_64.rpm"
+      aznfs_expected_version: "0.3.458"
+    - marketplace_image: "canonical 0001-com-ubuntu-server-jammy 22_04-lts latest"
+      aznfs_package_url: "https://packages.microsoft.com/ubuntu/22.04/prod/pool/main/a/aznfs/aznfs_0.3.458_amd64.deb"
+      aznfs_expected_version: "0.3.458"
+    # --- add more distros below (verify the URL resolves first) ---
+    # - marketplace_image: "canonical ubuntu-24_04-lts server latest"
+    #   aznfs_package_url: "https://packages.microsoft.com/ubuntu/24.04/prod/pool/main/a/aznfs/aznfs_0.3.458_amd64.deb"
+    #   aznfs_expected_version: "0.3.458"

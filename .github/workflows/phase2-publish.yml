@@ -1,0 +1,143 @@
+name: Phase 2 - Validate against PMC prod
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+on:
+  # Run automatically after Phase 1 ("Scan Marketplace Images") finishes.
+  # `workflow_run` only fires for workflow files on the default branch.
+  workflow_run:
+    workflows: ["Scan Marketplace Images"]
+    types: [completed]
+  workflow_dispatch:
+    # Manual trigger (e.g. re-run after a package is manually published to prod
+    # so a pending_publish distro flows through to validation).
+
+# Serialize on the shared SQLite DB cache. Phase 2 AND Phase 3 both mutate
+# marketplace.db, so they must run one-at-a-time under ONE concurrency group to
+# avoid clobbering each other's writes (last-writer-wins on the cache).
+# IMPORTANT: Phase 3's workflow MUST use this same group name to be serialized.
+concurrency:
+  group: marketplace-db
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # When triggered by Phase 1, only proceed if Phase 1 actually succeeded.
+    # (A manual workflow_dispatch has no upstream conclusion, so allow it too.)
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          github.event.workflow_run.conclusion == 'success' }}
+    runs-on:
+      - self-hosted
+      - azure-vm-marketplace
+
+    steps:
+      # ----------------------------------------------------------------
+      # 1. Checkout source
+      # ----------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------
+      # 2. Restore the shared SQLite DB (most recent, via the prefix key).
+      #    Phase 2 updates each row's `validated` state, then re-saves the
+      #    cache under the same prefix so the next Phase 1 run sees it.
+      # ----------------------------------------------------------------
+      - name: Restore database cache
+        uses: actions/cache/restore@v4
+        with:
+          path: marketplace.db
+          key: marketplace-db-v2-${{ github.run_id }}
+          restore-keys: |
+            marketplace-db-v2-
+
+      # ----------------------------------------------------------------
+      # 3. Python setup and dependency install
+      # ----------------------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ----------------------------------------------------------------
+      # 4. Fetch Phase 1's hand-off (needs_validation.json).
+      #    On workflow_run we pull the artifact the triggering Phase 1 run
+      #    uploaded; on manual dispatch we fall back to whatever the most
+      #    recent successful Phase 1 run produced.
+      # ----------------------------------------------------------------
+      - name: Download Phase 1 output (from triggering run)
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: marketplace-scan-${{ github.event.workflow_run.run_number }}
+          path: output
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          merge-multiple: true
+
+      - name: Download latest Phase 1 output (manual dispatch)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: scan-marketplace.yml
+          workflow_conclusion: success
+          name_is_regexp: true
+          name: marketplace-scan-.*
+          path: output
+          if_no_artifact_found: fail
+
+      # ----------------------------------------------------------------
+      # 5. Run the Phase 2 validation orchestrator (src/phase2/run.py).
+      #
+      #    Checks each image against PMC prod (packages.microsoft.com):
+      #      repo exists? -> package published? -> newer than last validated?
+      #    Anonymous, public HTTP -- no PMC API, no corp proxy, no ADO build.
+      #
+      #    Exit codes: 0 = run completed (per-image outcomes reported via the
+      #    Phase 1 e-mail notifier + summary); 1 = run error; 2 = bad input.
+      # ----------------------------------------------------------------
+      - name: Run Phase 2 orchestrator
+        env:
+          # Phase 1 helpers (notifier.py, db_manager.py) live in scripts/ as
+          # top-level modules; put it on PYTHONPATH so run.py's _load_phase1()
+          # can `import notifier, db_manager` at runtime.
+          PYTHONPATH: scripts
+          # --- Azure creds for the in-process ACS e-mail notifier (shared with Phase 1) ---
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_MANAGED_IDENTITY_CLIENT_ID: ${{ vars.AZURE_MANAGED_IDENTITY_CLIENT_ID }}
+          ACS_ENDPOINT: ${{ vars.ACS_ENDPOINT }}
+          ACS_SENDER: ${{ vars.ACS_SENDER }}
+          NOTIFY_RECIPIENTS: ${{ vars.NOTIFY_RECIPIENTS }}
+          # --- PMC prod content server (public, anonymous). Override only for testing. ---
+          PROD_REPO_BASE: ${{ vars.PROD_REPO_BASE }}
+          HTTP_TIMEOUT: ${{ vars.HTTP_TIMEOUT }}
+          # --- Paths ---
+          DB_PATH: marketplace.db
+        run: |
+          python -m src.phase2.run --input output/needs_validation.json --output output/lisa_jobs.json
+
+      # ----------------------------------------------------------------
+      # 6. Upload the Phase 3 hand-off (LISA jobs) as an artifact.
+      # ----------------------------------------------------------------
+      - name: Upload LISA jobs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lisa-jobs-${{ github.run_number }}
+          path: output/lisa_jobs.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # ----------------------------------------------------------------
+      # 7. Persist the DB (validation-state updates) for the next run.
+      # ----------------------------------------------------------------
+      - name: Save database cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: marketplace.db
+          key: marketplace-db-v2-${{ github.run_id }}
