@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Phase 3 automation driver.
 
@@ -97,10 +97,13 @@ def _run_lisa(job: LisaJob, subscription_id: str, concurrency: int) -> Path:
     proc = subprocess.run(
         cmd, capture_output=True, text=True, check=False
     )
-    match = _RUN_LOG_RE.search(proc.stdout)
+    # LISA writes its structured log (including "run log path:") to stderr
+    # (Python logging default). Search both streams so neither is missed.
+    match = _RUN_LOG_RE.search(proc.stdout) or _RUN_LOG_RE.search(proc.stderr)
     if not match:
         raise RuntimeError(
-            f"could not find run log path in LISA output for {job.distro_label}"
+            f"could not find run log path in LISA output for {job.distro_label}\n"
+            f"stdout: {proc.stdout[-500:]}\nstderr: {proc.stderr[-500:]}"
         )
     return Path(match.group(1)) / "lisa.junit.xml"
 
@@ -223,3 +226,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
