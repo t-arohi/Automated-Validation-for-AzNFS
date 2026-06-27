@@ -87,8 +87,8 @@ def test_no_prod_repo_marks_unsupported():
 
     r = process_entry(entry(), prod, db)
 
-    assert r.outcome == "unsupported"
-    assert r.reason == "repo is missing"
+    assert r.outcome == "known_unsupported"
+    assert r.reason == "prod repo is missing"
     assert db.updates[-1] == (
         ("Canonical", "ubuntu-22_04-lts", "server", "eastus", "x86_64"),
         KNOWN_UNSUPPORTED,
@@ -98,20 +98,59 @@ def test_no_prod_repo_marks_unsupported():
 # ---------------------------------------------------------------------------
 # Gate 2 -> pending_publish
 # ---------------------------------------------------------------------------
-def test_repo_exists_but_no_aznfs_marks_pending_publish():
-    # Debian real case: /debian/11/prod/ exists but no aznfs published.
-    prod = FakeProd(repos={"debian": {"11"}}, packages={})
+def test_repo_exists_but_no_aznfs_marks_pending_publish(monkeypatch):
+    # A SUPPORTED distro (Ubuntu 22.04) whose prod pocket exists but has no aznfs
+    # published yet -> pending_publish. The packages.csv lookup is stubbed so the
+    # unit test stays offline; csv-present => "publish manually" guidance.
+    monkeypatch.setattr(
+        "src.phase2.orchestrator._packages_csv_mentions_distro", lambda label: True
+    )
+    prod = FakeProd(repos={"ubuntu": {"22.04"}}, packages={})
     db = FakeDb()
 
-    r = process_entry(entry(publisher="Debian", distro_label="Debian 11"), prod, db)
+    r = process_entry(entry(), prod, db)
 
     assert r.outcome == "pending_publish"
     assert "publish" in r.reason.lower()
     assert db.updates[-1][1] == PENDING_PUBLISH
 
 
-def test_aznfs_present_for_other_arch_only_is_pending_publish():
-    # Only arm64 published; the x86_64 image is still uncovered.
+def test_repo_exists_unsupported_distro_marks_known_unsupported():
+    # Repo exists but the distro is NOT in the AzNFS support list (e.g. Debian)
+    # -> known_unsupported with the "repo found, packages missing, distro not
+    # supported" reason. No packages.csv lookup happens on this path.
+    prod = FakeProd(repos={"debian": {"11"}}, packages={})
+    db = FakeDb()
+
+    r = process_entry(entry(publisher="Debian", distro_label="Debian 11"), prod, db)
+
+    assert r.outcome == "known_unsupported"
+    assert "not supported by AzNFS" in r.reason
+    assert db.updates[-1][1] == KNOWN_UNSUPPORTED
+
+
+def test_supported_distro_missing_from_csv_asks_team_to_update(monkeypatch):
+    # Supported distro, repo exists, no package, and NOT present in packages.csv
+    # -> pending_publish asking the team to update the csv/yaml and re-invoke.
+    monkeypatch.setattr(
+        "src.phase2.orchestrator._packages_csv_mentions_distro", lambda label: False
+    )
+    prod = FakeProd(repos={"ubuntu": {"22.04"}}, packages={})
+    db = FakeDb()
+
+    r = process_entry(entry(), prod, db)
+
+    assert r.outcome == "pending_publish"
+    assert "packages.csv" in r.reason.lower()
+    assert db.updates[-1][1] == PENDING_PUBLISH
+
+
+def test_aznfs_present_for_other_arch_only_is_pending_publish(monkeypatch):
+    # Only arm64 published; the x86_64 image is still uncovered. Ubuntu is a
+    # supported distro, so the missing-arch case is pending_publish (csv stubbed).
+    monkeypatch.setattr(
+        "src.phase2.orchestrator._packages_csv_mentions_distro", lambda label: True
+    )
     prod = FakeProd(
         repos={"ubuntu": {"22.04"}},
         packages={("ubuntu", "22.04"): ["aznfs_0.3.2_arm64.deb"]},
@@ -212,8 +251,12 @@ def test_series_filter_ignores_non_0_3_lineages():
     assert r.lisa_job["aznfs_package_url"].endswith("aznfs_0.3.458_amd64.deb")
 
 
-def test_only_non_series_builds_is_pending_publish():
+def test_only_non_series_builds_is_pending_publish(monkeypatch):
     # Repo exists and aznfs is published, but only on the untracked 3.0.x/1.x line.
+    # Ubuntu is supported, so the (no in-series build) case is pending_publish.
+    monkeypatch.setattr(
+        "src.phase2.orchestrator._packages_csv_mentions_distro", lambda label: True
+    )
     prod = FakeProd(
         repos={"ubuntu": {"22.04"}},
         packages={("ubuntu", "22.04"): [
@@ -255,9 +298,13 @@ def test_yum_minor_fallback_and_arch_mapping_to_phase3():
 # ---------------------------------------------------------------------------
 # run_phase2 aggregation -> exactly one summary mail with every distro + reason
 # ---------------------------------------------------------------------------
-def test_run_phase2_buckets_writes_jobs_and_single_summary(tmp_path):
+def test_run_phase2_buckets_writes_jobs_and_single_summary(tmp_path, monkeypatch):
+    # RHEL 9 is supported but unpublished -> pending_publish (csv stubbed present).
+    monkeypatch.setattr(
+        "src.phase2.orchestrator._packages_csv_mentions_distro", lambda label: True
+    )
     prod = FakeProd(
-        repos={"ubuntu": {"22.04"}, "debian": {"11"}},
+        repos={"ubuntu": {"22.04"}, "debian": {"11"}, "rhel": {"9"}},
         packages={("ubuntu", "22.04"): ["aznfs_0.3.2_amd64.deb"]},
     )
     db, notifier = FakeDb(), FakeNotifier()
@@ -267,8 +314,10 @@ def test_run_phase2_buckets_writes_jobs_and_single_summary(tmp_path):
         entry(last_validated_version=""),                                   # to_phase3
         entry(distro_label="Ubuntu 22.04", last_validated_version="0.3.2",
               sku="other"),                                                  # trusted
-        entry(publisher="Debian", distro_label="Debian 11", sku="deb"),     # pending_publish
-        entry(publisher="BellLabs", distro_label="Plan9 4", sku="x"),       # unsupported
+        entry(publisher="RedHat", distro_label="RHEL 9", family="yum",
+              image="RHEL", sku="9-lvm"),                                    # pending_publish (supported, no pkg)
+        entry(publisher="Debian", distro_label="Debian 11", sku="deb"),     # known_unsupported (repo exists, AzNFS-unsupported)
+        entry(publisher="BellLabs", distro_label="Plan9 4", sku="x"),       # known_unsupported (no prod repo)
     ]
 
     jobs = run_phase2(entries, prod, db, notifier, lisa_jobs_path=str(out))
@@ -277,13 +326,17 @@ def test_run_phase2_buckets_writes_jobs_and_single_summary(tmp_path):
     # Exactly one mail (the summary) for the whole run.
     assert len(notifier.summaries) == 1
     s = notifier.summaries[-1]
-    assert s["processed"] == 4
+    assert s["processed"] == 5
     assert s["to_phase3"] == ["Ubuntu 22.04"]
     assert s["trusted"] == ["Ubuntu 22.04"]
     # Failing buckets carry (distro_label, reason) so the mail explains each one.
-    assert [lbl for lbl, _ in s["pending_publish"]] == ["Debian 11"]
+    assert [lbl for lbl, _ in s["pending_publish"]] == ["RHEL 9"]
     assert "publish" in s["pending_publish"][0][1].lower()
-    assert s["unsupported"] == [("Plan9 4", "repo is missing")]
+    # Debian (repo exists but AzNFS-unsupported) + Plan9 (no repo) are both unsupported.
+    unsupported = dict(s["unsupported"])
+    assert list(unsupported) == ["Debian 11", "Plan9 4"]
+    assert "not supported by AzNFS" in unsupported["Debian 11"]
+    assert unsupported["Plan9 4"] == "prod repo is missing"
     assert s["errors"] == []
 
     written = json.loads(out.read_text())
