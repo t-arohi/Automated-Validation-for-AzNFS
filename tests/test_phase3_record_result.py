@@ -111,8 +111,15 @@ def test_run_sends_single_summary_with_reasons(tmp_path, monkeypatch):
     assert len(sent) == 1  # exactly ONE e-mail for the whole run
     subject, body = sent[0]
     assert "1 supported, 1 unsupported" in subject
-    assert "RHEL 9.5" in body
-    assert "SLES 15.5: [Tier 4: mount] failed to mount" in body
+    # Pass line: distro + DB state transition.
+    assert "validation done for distro RHEL 9.5" in body
+    assert "validation_state changed to known_supported in DB" in body
+    # Fail line: distro (quoted) + failing tier reason + DB state transition + URN/logs.
+    assert 'validation fails for distro "SLES 15.5"' in body
+    assert "[Tier 4: mount] failed to mount" in body
+    assert "validation_state changed to known_unsupported in DB" in body
+    assert "image URN:" in body
+    assert "logs URL:" in body
 
 
 # ---------------------------------------------------------------------------
