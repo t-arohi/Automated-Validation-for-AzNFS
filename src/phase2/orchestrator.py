@@ -265,7 +265,7 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike) -> Phase2Result:
     if not arch_files:
         label = entry.get("distro_label", "")
         if not _is_aznfs_supported_distro(label):
-            reason = f"{label}: distro is not supported by AzNFS"
+            reason = f"{label}: repo is found but packages are not found because distro is not supported by AzNFS"
             db.set_validation_state(ident, KNOWN_UNSUPPORTED)
             return Phase2Result("known_unsupported", reason=reason)
 
@@ -351,3 +351,4 @@ def run_phase2(
         len(entries), len(to_phase3), len(trusted), len(pending_publish), len(unsupported), len(errors),
     )
     return lisa_jobs
+
