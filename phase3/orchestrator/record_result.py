@@ -1,4 +1,4 @@
-"""
+﻿"""
 Phase 3 - record the validation verdict (DB update + one summary e-mail).
 
 Runs AFTER LISA validation. Phase 3 is LISA testing ONLY: there is no PMC prod
@@ -78,17 +78,11 @@ def _now_iso() -> str:
 # ---------------------------------------------------------------------------
 def _ensure_phase3_columns(conn: sqlite3.Connection) -> None:
     """Add the last_validated column if it does not exist (idempotent)."""
-    if os.path.exists(config.PHASE3_SCHEMA_PATH):
-        with open(config.PHASE3_SCHEMA_PATH, "r") as fh:
-            for stmt in fh.read().split(";"):
-                stmt = stmt.strip()
-                if not stmt:
-                    continue
-                try:
-                    conn.execute(stmt)
-                except sqlite3.OperationalError:
-                    pass  # column already exists - safe to ignore
-    conn.commit()
+    try:
+        conn.execute("ALTER TABLE images ADD COLUMN last_validated TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # duplicate column name - already added in a prior run
 
 
 def _record_validation(image_key: Dict[str, str], validated: str) -> None:
@@ -237,3 +231,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
