@@ -100,7 +100,8 @@ jobs:
       # 5. Run the Phase 3 driver: per-distro LISA validation, then record
       #    each verdict in the DB and send ONE summary e-mail.
       #
-      #    The runner's system managed identity must be able to create test VMs.
+      #    The runner's USER-assigned managed identity (AZURE_CLIENT_ID) must
+      #    be able to create test VMs; the system-assigned MI cannot (no RBAC).
       # ----------------------------------------------------------------
       - name: Run Phase 3 validation
         env:
@@ -110,6 +111,14 @@ jobs:
           # --- Azure creds for the ACS e-mail notifier (shared with Phase 1/2) ---
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_MANAGED_IDENTITY_CLIENT_ID: ${{ vars.AZURE_MANAGED_IDENTITY_CLIENT_ID }}
+          # LISA (DefaultAzureCredential) and `az login --identity` BOTH default
+          # to the VM's SYSTEM-assigned MI, which has NO subscription RBAC ->
+          # AuthorizationFailed on Microsoft.Resources/subscriptions/read and
+          # every environment fails to deploy. The Azure SDK's
+          # ManagedIdentityCredential selects a USER-assigned MI only via
+          # AZURE_CLIENT_ID (it ignores AZURE_MANAGED_IDENTITY_CLIENT_ID), so
+          # export it here to pin both to the authorized user-assigned MI.
+          AZURE_CLIENT_ID: ${{ vars.AZURE_MANAGED_IDENTITY_CLIENT_ID }}
           ACS_ENDPOINT: ${{ vars.ACS_ENDPOINT }}
           ACS_SENDER: ${{ vars.ACS_SENDER }}
           NOTIFY_RECIPIENTS: ${{ vars.NOTIFY_RECIPIENTS }}
@@ -129,7 +138,11 @@ jobs:
           # Activate the LISA engine venv (path overridable via LISA_VENV).
           source "${LISA_VENV:-$HOME/lisa-venv}/bin/activate"
           # Refresh Azure auth for VM provisioning via the runner's identity.
-          az login --identity --allow-no-subscriptions >/dev/null
+          # Pin to the USER-assigned MI (AZURE_CLIENT_ID) - the system-assigned
+          # MI has no subscription RBAC, so plain `az login --identity` would
+          # authenticate as an identity that cannot deploy VMs.
+          az login --identity --client-id "${AZURE_CLIENT_ID}" \
+            --allow-no-subscriptions >/dev/null
           python -m phase3.run_phase3 output/lisa_jobs.json \
             --subscription-id "${AZURE_SUBSCRIPTION_ID}" \
             --concurrency "${PHASE3_CONCURRENCY:-3}" \
