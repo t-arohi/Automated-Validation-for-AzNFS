@@ -89,7 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           VENV="${LISA_VENV:-$HOME/lisa-venv}"
-          if [ -x "$VENV/bin/lisa" ] || [ -x "$VENV/bin/python" ] && "$VENV/bin/lisa" --help >/dev/null 2>&1; then
+          if "$VENV/bin/lisa" --help >/dev/null 2>&1; then
             echo "LISA already present at $VENV; skipping bootstrap."
           else
             echo "LISA not found at $VENV; running phase3/setup_lisa.sh..."
