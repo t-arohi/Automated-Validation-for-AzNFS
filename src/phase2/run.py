@@ -63,13 +63,13 @@ class Phase1NotifierAdapter:
     def __init__(self, notifier_mod: Any) -> None:
         self._n = notifier_mod
 
-    def notify_summary(self, processed, unsupported, pending_publish, trusted, to_phase3, errors) -> None:
+    def notify_summary(self, processed, to_phase3, trusted, pending_publish, unsupported, errors) -> None:
         self._n.send_phase2_summary(
             processed=processed,
-            unsupported=unsupported,
-            pending_publish=pending_publish,
             to_phase3=to_phase3,
             trusted=trusted,
+            pending_publish=pending_publish,
+            unsupported=unsupported,
             errors=errors,
         )
 

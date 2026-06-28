@@ -105,10 +105,16 @@ def derive_family_and_distro_label(
 
     # Red Hat family
     if p == "redhat" or o == "rhel" or "rhel" in o:
-        # SKUs encode the release as major[.minor] with assorted separators or
-        # none at all, e.g. 9-lvm-gen2 -> 9, 8_2 -> 8.2, 7.9 -> 7.9,
-        # 90-gen2 -> 9.0, 810 -> 8.10, 100 -> 10.0.
-        match = re.match(r"(10|\d)[._-]?(\d{1,2})?", s)
+        # Some offers/SKUs embed the major right after 'rhel' (offer 'rh-rhel',
+        # sku 'rh-rhel9' / 'rh-rhel9-arm64'); match that first so it does not
+        # fall through to a bare 'RHEL'. Otherwise SKUs encode the release as
+        # major[.minor] with assorted separators or none at all, e.g.
+        # 9-lvm-gen2 -> 9, 8_2 -> 8.2, 7.9 -> 7.9, 90-gen2 -> 9.0, 810 -> 8.10.
+        match = (
+            re.search(r"rhel[-_]?(10|\d)(?:[._-]?(\d{1,2}))?", s)
+            or re.search(r"rhel[-_]?(10|\d)(?:[._-]?(\d{1,2}))?", o)
+            or re.match(r"(10|\d)[._-]?(\d{1,2})?", s)
+        )
         if match:
             major, minor = match.group(1), match.group(2)
             if minor:
@@ -134,7 +140,12 @@ def derive_family_and_distro_label(
 
     # Rocky Linux (commonly under RESF publisher in Marketplace).
     if "rocky" in o or "rocky" in s or p == "resf":
-        match = re.search(r"rocky[-_ ]?(\d+)", o) or re.search(r"^(\d+)", s)
+        # The major may be in the offer (rockylinux-x86_64 + sku '8-base') or
+        # buried in the sku after the arch token (offer 'rockylinux-aarch64',
+        # sku 'rockylinux-aarch64-8' / 'rockylinux-aarch64-9-lvm'). Strip the
+        # arch / gen tokens first, then take the version digit.
+        cleaned = re.sub(r"(aarch64|x86_64|arm64|gen\d)", " ", f"{o} {s}")
+        match = re.search(r"rocky\w*[-_ ]*(\d+)", cleaned) or re.search(r"(\d+)", cleaned)
         if match:
             return "yum", f"Rocky {match.group(1)}"
         return "yum", "Rocky"

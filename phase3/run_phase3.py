@@ -58,7 +58,11 @@ logger = logging.getLogger("phase3.driver")
 
 _HERE = Path(__file__).resolve().parent
 _BASE_RUNBOOK = _HERE / "runbooks" / "aznfs_validation.yml"
-_RUN_LOG_RE = re.compile(r"run log path:\s*(\S+)")
+# LISA logs the line `run log path: <PATH>, working path: <PATH>` (note the
+# trailing comma + space after <PATH> -- see lisa/main.py). Capturing `\S+`
+# greedily swallowed that comma, yielding `<PATH>,/lisa.junit.xml` (a path that
+# never exists). Exclude whitespace AND commas so we get the clean directory.
+_RUN_LOG_RE = re.compile(r"run log path:\s*([^\s,]+)")
 # A test asserts with a "[Tier N: step]" prefix so a failure can be blamed on the
 # exact stage (artifact / install / footprint / mount / io / watchdog).
 _TIER_RE = re.compile(r"\[Tier \d[^\]]*\]")
@@ -105,7 +109,18 @@ def _run_lisa(job: LisaJob, subscription_id: str, concurrency: int) -> Path:
             f"could not find run log path in LISA output for {job.distro_label}\n"
             f"stdout: {proc.stdout[-500:]}\nstderr: {proc.stderr[-500:]}"
         )
-    return Path(match.group(1)) / "lisa.junit.xml"
+    junit = Path(match.group(1)) / "lisa.junit.xml"
+    if not junit.exists():
+        # LISA printed a run-log path but produced no junit -> it exited before
+        # writing results (e.g. it crashed at startup, or the image/auth failed
+        # fast). Surface LISA's own output so the failure is diagnosable in the
+        # summary e-mail instead of a bare FileNotFoundError.
+        raise RuntimeError(
+            f"LISA produced no junit for {job.distro_label} "
+            f"(exit={proc.returncode}); last LISA output:\n"
+            f"{(proc.stderr or proc.stdout)[-700:]}"
+        )
+    return junit
 
 
 def _parse_junit(xml_path: Path) -> Tuple[int, int, int, str]:

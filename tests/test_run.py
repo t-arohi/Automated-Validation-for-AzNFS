@@ -231,7 +231,10 @@ def test_run_end_to_end_to_phase3_writes_lisa_jobs(tmp_path):
     assert db_mod.calls[-1][2] == "pending_validation"
     # Exactly one mail: the summary, with this distro in the to_phase3 bucket.
     assert len(notifier_mod.summaries) == 1
-    assert notifier_mod.summaries[-1]["to_phase3"] == ["Ubuntu 22.04"]
+    to_phase3 = notifier_mod.summaries[-1]["to_phase3"]
+    assert [r["label"] for r in to_phase3] == ["Ubuntu 22.04"]
+    assert to_phase3[0]["arch"] == "x86_64"
+    assert to_phase3[0]["url"].endswith("aznfs_0.3.2_amd64.deb")
 
 
 def test_run_end_to_end_trusted(tmp_path):
@@ -254,4 +257,4 @@ def test_run_end_to_end_trusted(tmp_path):
     assert jobs == []
     assert db_mod.calls[-1][2] == "known_supported"
     assert len(notifier_mod.summaries) == 1
-    assert notifier_mod.summaries[-1]["trusted"] == ["Ubuntu 22.04"]
+    assert [r["label"] for r in notifier_mod.summaries[-1]["trusted"]] == ["Ubuntu 22.04"]

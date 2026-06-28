@@ -51,14 +51,23 @@ class DbLike(Protocol):
 
 
 class NotifierLike(Protocol):
-    """Phase 2 emits a single end-of-run summary; there are no per-distro mails."""
+    """Phase 2 emits a single end-of-run summary; there are no per-distro mails.
+
+    Each bucket is a list of small dicts so the summary e-mail renders one table
+    per outcome, one column per field:
+      * to_phase3       -> {"label", "arch", "url"}
+      * trusted         -> {"label", "arch"}
+      * pending_publish -> {"label", "arch", "reason"}
+      * unsupported     -> {"label", "arch", "reason"}
+    ``errors`` stays a list of ``(label, reason)`` tuples.
+    """
     def notify_summary(
         self,
         processed: int,
-        unsupported: list[tuple[str, str]],
-        pending_publish: list[tuple[str, str]],
-        trusted: list[str],
-        to_phase3: list[str],
+        to_phase3: list[dict],
+        trusted: list[dict],
+        pending_publish: list[dict],
+        unsupported: list[dict],
         errors: list[tuple[str, str]],
     ) -> None: ...
 
@@ -264,24 +273,29 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike) -> Phase2Result:
     ]
     if not arch_files:
         label = entry.get("distro_label", "")
+        # (a) the distro is outside the AzNFS support matrix -> terminal.
         if not _is_aznfs_supported_distro(label):
-            reason = f"{label}: repo is found but packages are not found because distro is not supported by AzNFS"
             db.set_validation_state(ident, KNOWN_UNSUPPORTED)
-            return Phase2Result("known_unsupported", reason=reason)
-
+            return Phase2Result(
+                "known_unsupported",
+                reason="repo is found but packages are not found because distro is not supported by AzNFS",
+            )
+        # (b) supported distro already listed in AZNFS-mount/packages.csv -> the
+        # csv does not need a change; a human just needs to publish the package.
         if _packages_csv_mentions_distro(label):
-            reason = (
-                f"{label}: no AzNFS packages found ({want_arch}) on prod; "
-                "publish packages manually and re-invoke Phase 2"
+            db.set_validation_state(ident, PENDING_PUBLISH)
+            return Phase2Result(
+                "pending_publish",
+                reason="no AzNFS packages found on prod and packages.csv does not "
+                "require modification; publish packages manually and re-invoke Phase 2",
             )
-        else:
-            reason = (
-                f"{label}: no AzNFS packages found ({want_arch}) and not present "
-                "in AZNFS-mount/packages.csv; team must update yaml/csv, push "
-                "branch, and re-invoke Phase 2 with that branch"
-            )
-        db.set_validation_state(ident, PENDING_PUBLISH)
-        return Phase2Result("pending_publish", reason=reason)
+        # (c) supported distro MISSING from packages.csv -> needs a csv/code
+        # change first; mark known_unsupported until that branch is built.
+        db.set_validation_state(ident, KNOWN_UNSUPPORTED)
+        return Phase2Result(
+            "known_unsupported",
+            reason="team must update packages.csv + push branch + re-invoke Phase 2 with the new branch",
+        )
 
     # Gate 3: validation needed? Numeric-latest 0.3.x prod version vs what Phase 3 last validated.
     best = max(arch_files, key=lambda f: pmc_packages.version_tuple(pmc_packages.version_from_filename(f)))
@@ -301,6 +315,40 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike) -> Phase2Result:
     return Phase2Result("to_phase3", reason=reason, lisa_job=lisa_job)
 
 
+def _dedup_jobs_by_url(jobs: list[dict]) -> list[dict]:
+    """One LISA job per distinct ``aznfs_package_url``, keeping the newest image.
+
+    Many marketplace SKUs of the same OS release (e.g. CentOS 7.3 .. 7.9, or
+    RHEL 9.0 .. 9.8) all resolve to the SAME prod package URL (centos/7, rhel/9,
+    ...). Phase 3 only needs to validate that package once per architecture, so
+    collapse them to the entry with the latest marketplace ``version`` -- a
+    deterministic pick that also validates the freshest image. The result is a
+    list whose ``aznfs_package_url`` values are all distinct.
+    """
+    best: dict[str, dict] = {}
+    for j in jobs:
+        url = j.get("aznfs_package_url", "")
+        cur = best.get(url)
+        if cur is None or pmc_packages.version_tuple(j.get("version", "")) > pmc_packages.version_tuple(cur.get("version", "")):
+            best[url] = j
+    return sorted(best.values(), key=lambda j: (j.get("distro_label") or "", j.get("arch") or ""))
+
+
+def _dedup_label_arch(rows: list[dict]) -> list[dict]:
+    """Collapse rows to one per (distro_label, arch), keeping the first reason.
+
+    A distro that shows up under many SKUs of the same release+architecture
+    should appear ONCE in the summary; different architectures stay separate
+    rows (that is why the tables carry an ``arch`` column).
+    """
+    seen: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        key = (r.get("label") or "", r.get("arch") or "")
+        if key not in seen:
+            seen[key] = r
+    return sorted(seen.values(), key=lambda r: (r.get("label") or "", r.get("arch") or ""))
+
+
 def run_phase2(
     entries: list[dict],
     prod: ProdLike,
@@ -308,16 +356,22 @@ def run_phase2(
     notifier: NotifierLike,
     lisa_jobs_path: str | None = None,
 ) -> list[dict]:
-    """Process every image, write the Phase 3 hand-off, and send the single summary."""
-    lisa_jobs: list[dict] = []
-    unsupported: list[tuple[str, str]] = []
-    pending_publish: list[tuple[str, str]] = []
-    trusted: list[str] = []
-    to_phase3: list[str] = []
+    """Process every image, write the Phase 3 hand-off, and send the single summary.
+
+    The DB side-effect runs once per input image (each SKU row gets its state),
+    but the LISA hand-off and the summary tables are de-duplicated: the jobs to
+    one entry per distinct prod package URL (latest image wins) and the report
+    buckets to one row per (distro_label, architecture).
+    """
+    raw_jobs: list[dict] = []
+    unsupported: list[dict] = []
+    pending_publish: list[dict] = []
+    trusted: list[dict] = []
     errors: list[tuple[str, str]] = []
 
     for e in entries:
         label = e.get("distro_label", "?")
+        arch = e.get("architecture") or e.get("arch") or ""
         try:
             result = process_entry(e, prod, db)
         except Exception as exc:  # one image's failure never aborts the run
@@ -326,24 +380,31 @@ def run_phase2(
             continue
 
         if result.outcome == "known_unsupported":
-            unsupported.append((label, result.reason))
+            unsupported.append({"label": label, "arch": arch, "reason": result.reason})
         elif result.outcome == "pending_publish":
-            pending_publish.append((label, result.reason))
+            pending_publish.append({"label": label, "arch": arch, "reason": result.reason})
         elif result.outcome == "trusted":
-            trusted.append(label)
-        else:  # to_phase3
-            to_phase3.append(label)
-            if result.lisa_job:
-                lisa_jobs.append(result.lisa_job)
+            trusted.append({"label": label, "arch": arch})
+        elif result.lisa_job:  # to_phase3
+            raw_jobs.append(result.lisa_job)
+
+    lisa_jobs = _dedup_jobs_by_url(raw_jobs)
+    to_phase3 = [
+        {"label": j.get("distro_label"), "arch": j.get("arch"), "url": j.get("aznfs_package_url")}
+        for j in lisa_jobs
+    ]
+    trusted = _dedup_label_arch(trusted)
+    pending_publish = _dedup_label_arch(pending_publish)
+    unsupported = _dedup_label_arch(unsupported)
 
     if lisa_jobs_path:
         write_lisa_jobs(lisa_jobs, lisa_jobs_path)
     notifier.notify_summary(
         processed=len(entries),
-        unsupported=unsupported,
-        pending_publish=pending_publish,
-        trusted=trusted,
         to_phase3=to_phase3,
+        trusted=trusted,
+        pending_publish=pending_publish,
+        unsupported=unsupported,
         errors=errors,
     )
     logger.info(

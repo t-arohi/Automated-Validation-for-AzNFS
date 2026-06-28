@@ -91,7 +91,10 @@ def test_run_sends_single_summary_with_reasons(tmp_path, monkeypatch):
     monkeypatch.setattr(record_result.config, "PHASE3_SCHEMA_PATH", "/nonexistent.sql")
 
     sent: list[tuple[str, str]] = []
-    monkeypatch.setattr(record_result, "_notify", lambda s, b: sent.append((s, b)))
+    monkeypatch.setattr(
+        record_result, "_notify",
+        lambda s, b, html_body=None: sent.append((s, b)),
+    )
 
     jobs = [
         record_result.LisaJob(
@@ -111,15 +114,15 @@ def test_run_sends_single_summary_with_reasons(tmp_path, monkeypatch):
     assert len(sent) == 1  # exactly ONE e-mail for the whole run
     subject, body = sent[0]
     assert "1 supported, 1 unsupported" in subject
-    # Pass line: distro + DB state transition.
-    assert "validation done for distro RHEL 9.5" in body
-    assert "validation_state changed to known_supported in DB" in body
-    # Fail line: distro (quoted) + failing tier reason + DB state transition + URN/logs.
-    assert 'validation fails for distro "SLES 15.5"' in body
+    # Table a) pass: distro + arch column.
+    assert "Validation successful (known_supported)" in body
+    assert "RHEL 9.5" in body
+    assert "arch=x86_64" in body
+    # Table b) fail: distro + failing tier reason + URN.
+    assert "Validation fails (kept in known_unsupported)" in body
+    assert "SLES 15.5" in body
     assert "[Tier 4: mount] failed to mount" in body
-    assert "validation_state changed to known_unsupported in DB" in body
-    assert "image URN:" in body
-    assert "logs URL:" in body
+    assert "suse:sles:15-sp5" in body
 
 
 # ---------------------------------------------------------------------------

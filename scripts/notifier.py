@@ -331,27 +331,60 @@ def send_phase2_trusted(
     notify(subject, "\n".join(lines), recipients=recipients)
 
 
+def _summary_table_html(title: str, columns: list[tuple[str, str]], rows: list[dict]) -> str:
+    """Render one titled HTML table. ``columns`` = [(dict_key, header), ...]."""
+    head = "".join(
+        "<th style='text-align:left;padding:6px 10px;background:#0078d4;color:#fff;"
+        f"font-weight:600;white-space:nowrap'>{html.escape(hdr)}</th>"
+        for _, hdr in columns
+    )
+    if rows:
+        body = ""
+        for i, r in enumerate(rows):
+            bg = "#ffffff" if i % 2 == 0 else "#f6f8fa"
+            cells = "".join(
+                "<td style='padding:6px 10px;border-top:1px solid #e1e4e8;"
+                f"word-break:break-all'>{html.escape(str(r.get(k, '') or ''))}</td>"
+                for k, _ in columns
+            )
+            body += f"<tr style='background:{bg}'>{cells}</tr>"
+    else:
+        body = (
+            f"<tr><td colspan='{len(columns)}' "
+            "style='padding:6px 10px;color:#888'>(none)</td></tr>"
+        )
+    return (
+        f"<h3 style='font-family:Segoe UI,sans-serif;font-size:15px;margin:18px 0 6px'>"
+        f"{html.escape(title)}</h3>"
+        "<table style='border-collapse:collapse;font-family:Segoe UI,sans-serif;"
+        "font-size:13px;border:1px solid #e1e4e8'>"
+        f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+    )
+
+
 def send_phase2_summary(
     processed: int,
-    unsupported: list[tuple[str, str]] | None = None,
-    pending_publish: list[tuple[str, str]] | None = None,
-    to_phase3: list[str] | None = None,
-    trusted: list[str] | None = None,
-    skipped: int = 0,
+    to_phase3: list[dict] | None = None,
+    trusted: list[dict] | None = None,
+    pending_publish: list[dict] | None = None,
+    unsupported: list[dict] | None = None,
     errors: list[tuple[str, str]] | None = None,
     recipients: Iterable[str] | None = None,
 ) -> None:
-    """The single end-of-run summary.
+    """The single end-of-run summary, rendered as four readable HTML tables.
 
-    ``unsupported`` / ``pending_publish`` / ``errors`` are lists of
-    ``(distro_label, reason)``; ``to_phase3`` is the list of distro_labels handed
-    to Phase 3 for validation; ``trusted`` is the list already validated on prod
-    (Phase 3 skipped).
+    Each bucket is a list of small dicts (see ``orchestrator.NotifierLike``):
+      * ``to_phase3``       -> {label, arch, url}
+      * ``trusted``         -> {label, arch}
+      * ``pending_publish`` -> {label, arch, reason}
+      * ``unsupported``     -> {label, arch, reason}
+    ``arch`` is its own column so the same distro on x86_64 and arm64 reads as
+    two clear rows rather than a confusing repeat.
     """
-    unsupported = unsupported or []
-    pending_publish = pending_publish or []
     to_phase3 = to_phase3 or []
     trusted = trusted or []
+    pending_publish = pending_publish or []
+    unsupported = unsupported or []
     errors = errors or []
 
     subject = (
@@ -360,21 +393,65 @@ def send_phase2_summary(
         f"{len(unsupported)} known_unsupported"
     )
 
-    def _lines(items):
-        return "\n".join(f"  - {lbl}: {reason}" for lbl, reason in items) or "  (none)"
+    def _plain(rows, keys):
+        if not rows:
+            return "  (none)"
+        return "\n".join(
+            "  - " + " | ".join(f"{k}={r.get(k, '')}" for k in keys) for r in rows
+        )
 
     plain = (
         f"Phase 2 processed {processed} image(s).\n\n"
-        f"Handed to Phase 3 ({len(to_phase3)}):\n"
-        + ("\n".join(f"  - {lbl}" for lbl in to_phase3) or "  (none)")
-        + f"\n\nAlready validated on prod, trusted (Phase 3 skipped) ({len(trusted)}):\n"
-        + ("\n".join(f"  - {lbl}" for lbl in trusted) or "  (none)")
-        + f"\n\nPending manual publish ({len(pending_publish)}):\n{_lines(pending_publish)}"
-        + f"\n\nMarked known_unsupported ({len(unsupported)}):\n{_lines(unsupported)}"
-        + (f"\n\nSkipped (family/label mismatch): {skipped}" if skipped else "")
-        + (f"\n\nOrchestrator errors ({len(errors)}):\n{_lines(errors)}" if errors else "")
+        f"a) Handed to Phase 3 ({len(to_phase3)}):\n{_plain(to_phase3, ['label', 'arch', 'url'])}\n\n"
+        f"b) Already validated on prod, trusted ({len(trusted)}):\n{_plain(trusted, ['label', 'arch'])}\n\n"
+        f"c) Pending manual publish ({len(pending_publish)}):\n{_plain(pending_publish, ['label', 'arch', 'reason'])}\n\n"
+        f"d) Marked known_unsupported ({len(unsupported)}):\n{_plain(unsupported, ['label', 'arch', 'reason'])}"
+        + (
+            "\n\ne) Orchestrator errors (" + str(len(errors)) + "):\n"
+            + "\n".join(f"  - {lbl}: {reason}" for lbl, reason in errors)
+            if errors
+            else ""
+        )
     )
-    notify(subject, plain, recipients=recipients)
+
+    html_body = (
+        "<div style='font-family:Segoe UI,sans-serif;color:#24292e'>"
+        f"<p style='font-size:14px'>Phase 2 processed <b>{processed}</b> image(s) &mdash; "
+        f"<b>{len(to_phase3)}</b> to Phase 3, <b>{len(trusted)}</b> trusted, "
+        f"<b>{len(pending_publish)}</b> pending publish, "
+        f"<b>{len(unsupported)}</b> known_unsupported.</p>"
+        + _summary_table_html(
+            f"a) Handed to Phase 3 ({len(to_phase3)})",
+            [("label", "Distro"), ("arch", "Arch"), ("url", "AzNFS package URL")],
+            to_phase3,
+        )
+        + _summary_table_html(
+            f"b) Already validated on prod, trusted ({len(trusted)})",
+            [("label", "Distro"), ("arch", "Arch")],
+            trusted,
+        )
+        + _summary_table_html(
+            f"c) Pending manual publish ({len(pending_publish)})",
+            [("label", "Distro"), ("arch", "Arch"), ("reason", "Reason")],
+            pending_publish,
+        )
+        + _summary_table_html(
+            f"d) Marked known_unsupported ({len(unsupported)})",
+            [("label", "Distro"), ("arch", "Arch"), ("reason", "Reason")],
+            unsupported,
+        )
+        + (
+            _summary_table_html(
+                f"e) Orchestrator errors ({len(errors)})",
+                [("label", "Distro"), ("reason", "Reason")],
+                [{"label": lbl, "reason": reason} for lbl, reason in errors],
+            )
+            if errors
+            else ""
+        )
+        + "</div>"
+    )
+    notify(subject, plain, html_body=html_body, recipients=recipients)
 
 
 def post_webhook(url: str | None, text: str, timeout: int = 15) -> bool:

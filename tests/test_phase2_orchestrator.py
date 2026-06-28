@@ -51,13 +51,13 @@ class FakeNotifier:
 
     summaries: list[dict] = field(default_factory=list)
 
-    def notify_summary(self, processed, unsupported, pending_publish, trusted, to_phase3, errors):
+    def notify_summary(self, processed, to_phase3, trusted, pending_publish, unsupported, errors):
         self.summaries.append({
             "processed": processed,
-            "unsupported": unsupported,
-            "pending_publish": pending_publish,
-            "trusted": trusted,
             "to_phase3": to_phase3,
+            "trusted": trusted,
+            "pending_publish": pending_publish,
+            "unsupported": unsupported,
             "errors": errors,
         })
 
@@ -129,9 +129,10 @@ def test_repo_exists_unsupported_distro_marks_known_unsupported():
     assert db.updates[-1][1] == KNOWN_UNSUPPORTED
 
 
-def test_supported_distro_missing_from_csv_asks_team_to_update(monkeypatch):
+def test_supported_distro_missing_from_csv_marks_known_unsupported(monkeypatch):
     # Supported distro, repo exists, no package, and NOT present in packages.csv
-    # -> pending_publish asking the team to update the csv/yaml and re-invoke.
+    # -> known_unsupported: the csv needs a change + branch before Phase 2 can
+    # validate it (publishing alone is not enough).
     monkeypatch.setattr(
         "src.phase2.orchestrator._packages_csv_mentions_distro", lambda label: False
     )
@@ -140,9 +141,9 @@ def test_supported_distro_missing_from_csv_asks_team_to_update(monkeypatch):
 
     r = process_entry(entry(), prod, db)
 
-    assert r.outcome == "pending_publish"
+    assert r.outcome == "known_unsupported"
     assert "packages.csv" in r.reason.lower()
-    assert db.updates[-1][1] == PENDING_PUBLISH
+    assert db.updates[-1][1] == KNOWN_UNSUPPORTED
 
 
 def test_aznfs_present_for_other_arch_only_is_pending_publish(monkeypatch):
@@ -327,14 +328,16 @@ def test_run_phase2_buckets_writes_jobs_and_single_summary(tmp_path, monkeypatch
     assert len(notifier.summaries) == 1
     s = notifier.summaries[-1]
     assert s["processed"] == 5
-    assert s["to_phase3"] == ["Ubuntu 22.04"]
-    assert s["trusted"] == ["Ubuntu 22.04"]
-    # Failing buckets carry (distro_label, reason) so the mail explains each one.
-    assert [lbl for lbl, _ in s["pending_publish"]] == ["RHEL 9"]
-    assert "publish" in s["pending_publish"][0][1].lower()
+    # Buckets are now lists of dicts (one table per outcome, arch its own column).
+    assert [r["label"] for r in s["to_phase3"]] == ["Ubuntu 22.04"]
+    assert s["to_phase3"][0]["arch"] == "x86_64"
+    assert s["to_phase3"][0]["url"].endswith("aznfs_0.3.2_amd64.deb")
+    assert [r["label"] for r in s["trusted"]] == ["Ubuntu 22.04"]
+    assert [r["label"] for r in s["pending_publish"]] == ["RHEL 9"]
+    assert "publish" in s["pending_publish"][0]["reason"].lower()
     # Debian (repo exists but AzNFS-unsupported) + Plan9 (no repo) are both unsupported.
-    unsupported = dict(s["unsupported"])
-    assert list(unsupported) == ["Debian 11", "Plan9 4"]
+    unsupported = {r["label"]: r["reason"] for r in s["unsupported"]}
+    assert sorted(unsupported) == ["Debian 11", "Plan9 4"]
     assert "not supported by AzNFS" in unsupported["Debian 11"]
     assert unsupported["Plan9 4"] == "prod repo is missing"
     assert s["errors"] == []
@@ -355,3 +358,55 @@ def test_run_phase2_swallows_per_entry_errors_into_summary():
     s = notifier.summaries[-1]
     assert s["processed"] == 1
     assert s["errors"] and "error" in s["errors"][0][1].lower()
+
+
+def test_run_phase2_dedups_jobs_by_url_keeping_latest_version(tmp_path):
+    # Many CentOS 7 SKUs (7.3 .. 7.9) all resolve to centos/7 -> ONE x86 job
+    # (the latest marketplace version) + ONE arm64 job (distinct url). Rocky 8
+    # and Rocky 9 are distinct urls -> two more jobs. Goal: distinct urls only.
+    prod = FakeProd(
+        repos={"centos": {"7"}, "rocky": {"8", "9"}},
+        packages={
+            ("centos", "7"): ["aznfs-0.3.458-1.x86_64.rpm", "aznfs-0.3.458-1.aarch64.rpm"],
+            ("rocky", "8"): ["aznfs-0.3.458-1.x86_64.rpm"],
+            ("rocky", "9"): ["aznfs-0.3.458-1.x86_64.rpm"],
+        },
+    )
+    db, notifier = FakeDb(), FakeNotifier()
+    out = tmp_path / "lisa_jobs.json"
+
+    def c(**kw):
+        base = dict(publisher="OpenLogic", image="CentOS", family="yum",
+                    region="eastus", architecture="x86_64", distro_label="CentOS 7",
+                    last_validated_version="")
+        base.update(kw)
+        return base
+
+    def rk(**kw):
+        base = dict(publisher="resf", image="rockylinux-x86_64", family="yum",
+                    region="eastus", architecture="x86_64", last_validated_version="")
+        base.update(kw)
+        return base
+
+    entries = [
+        c(sku="7.3", version="7.3.20210812"),
+        c(sku="7_9", version="7.9.2023030700"),
+        c(sku="7_9-gen2", version="7.9.2023030701"),               # latest x86 -> representative
+        c(sku="7_9-arm64", version="7.9.2024020802", architecture="arm64"),
+        rk(sku="8-base", version="8.9.20231119", distro_label="Rocky 8"),
+        rk(sku="9-base", version="9.6.20250531", distro_label="Rocky 9"),
+    ]
+
+    jobs = run_phase2(entries, prod, db, notifier, lisa_jobs_path=str(out))
+
+    urls = [j["aznfs_package_url"] for j in jobs]
+    assert len(urls) == len(set(urls))            # every url distinct
+    assert len(jobs) == 4                         # CentOS7 x86, CentOS7 arm, Rocky8, Rocky9
+    centos = [j for j in jobs if j["distro_label"] == "CentOS 7"]
+    x86 = next(j for j in centos if j["arch"] == "x86_64")
+    assert x86["version"] == "7.9.2023030701"     # latest version kept
+    assert {j["arch"] for j in centos} == {"x86_64", "arm64"}
+    assert any(j["aznfs_package_url"].endswith("/rocky/8/prod/Packages/a/aznfs-0.3.458-1.x86_64.rpm") for j in jobs)
+    assert any(j["aznfs_package_url"].endswith("/rocky/9/prod/Packages/a/aznfs-0.3.458-1.x86_64.rpm") for j in jobs)
+    # The summary's to_phase3 table mirrors the deduped jobs (one row per url).
+    assert len(notifier.summaries[-1]["to_phase3"]) == 4

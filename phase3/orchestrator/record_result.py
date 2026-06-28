@@ -145,7 +145,7 @@ def _record_validation(image_key: Dict[str, str], validated: str) -> None:
 # ---------------------------------------------------------------------------
 # Notifications - reuse the Phase 1 ACS notifier (one summary per run)
 # ---------------------------------------------------------------------------
-def _notify(subject: str, body: str) -> None:
+def _notify(subject: str, plain: str, html_body: str | None = None) -> None:
     """Send via the Phase 1 ACS notifier when importable; otherwise just log.
 
     The workflow puts ``scripts/`` on PYTHONPATH (same as Phase 2), so
@@ -158,9 +158,42 @@ def _notify(subject: str, body: str) -> None:
         try:
             from scripts import notifier  # type: ignore
         except ModuleNotFoundError:
-            logger.info("NOTIFY (no notifier module):\n%s\n%s", subject, body)
+            logger.info("NOTIFY (no notifier module):\n%s\n%s", subject, plain)
             return
-    notifier.notify(subject, body)
+    notifier.notify(subject, plain, html_body=html_body)
+
+
+def _table_html(title: str, columns: List[Tuple[str, str]], rows: List[Dict[str, str]]) -> str:
+    """Render one titled HTML table. ``columns`` = [(dict_key, header), ...]."""
+    import html as _html
+
+    head = "".join(
+        "<th style='text-align:left;padding:6px 10px;background:#0078d4;color:#fff;"
+        f"font-weight:600;white-space:nowrap'>{_html.escape(hdr)}</th>"
+        for _, hdr in columns
+    )
+    if rows:
+        body = ""
+        for i, r in enumerate(rows):
+            bg = "#ffffff" if i % 2 == 0 else "#f6f8fa"
+            cells = "".join(
+                "<td style='padding:6px 10px;border-top:1px solid #e1e4e8;"
+                f"word-break:break-all'>{_html.escape(str(r.get(k, '') or ''))}</td>"
+                for k, _ in columns
+            )
+            body += f"<tr style='background:{bg}'>{cells}</tr>"
+    else:
+        body = (
+            f"<tr><td colspan='{len(columns)}' "
+            "style='padding:6px 10px;color:#888'>(none)</td></tr>"
+        )
+    return (
+        f"<h3 style='font-family:Segoe UI,sans-serif;font-size:15px;margin:18px 0 6px'>"
+        f"{_html.escape(title)}</h3>"
+        "<table style='border-collapse:collapse;font-family:Segoe UI,sans-serif;"
+        "font-size:13px;border:1px solid #e1e4e8'>"
+        f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+    )
 
 
 def _send_summary(
@@ -168,37 +201,50 @@ def _send_summary(
     supported: List[Dict[str, str]],
     unsupported: List[Dict[str, str]],
 ) -> None:
-    """The single end-of-run e-mail with pass/fail + URN + logs + DB state."""
+    """The single end-of-run e-mail: two readable tables (pass / fail)."""
     subject = (
         f"[AzNFS Phase 3] validation summary: {len(supported)} supported, "
         f"{len(unsupported)} unsupported (of {processed})"
     )
-    lines = [f"Phase 3 validated {processed} distro(s) with LISA.", ""]
-    lines.append(f"Supported (known_supported) ({len(supported)}):")
-    if supported:
-        for item in supported:
-            lines += [
-                f"  - validation done for distro {item['label']}",
-                f"    image URN: {item['urn']}",
-                f"    logs URL: {item['logs_url']}",
-                "    validation_state changed to known_supported in DB",
-            ]
-    else:
-        lines.append("  (none)")
-    lines.append("")
-    lines.append(f"Unsupported (known_unsupported) ({len(unsupported)}):")
-    if unsupported:
-        for item in unsupported:
-            lines += [
-                f"  - validation fails for distro \"{item['label']}\"",
-                f"    image URN: {item['urn']}",
-                f"    logs URL: {item['logs_url']}",
-                "    validation_state changed to known_unsupported in DB",
-                f"    reason: {item['reason']}",
-            ]
-    else:
-        lines.append("  (none)")
-    _notify(subject, "\n".join(lines))
+
+    def _plain(rows, keys):
+        if not rows:
+            return "  (none)"
+        return "\n".join(
+            "  - " + " | ".join(f"{k}={r.get(k, '')}" for k in keys) for r in rows
+        )
+
+    plain = (
+        f"Phase 3 validated {processed} distro(s) with LISA.\n\n"
+        f"a) Validation successful (known_supported) ({len(supported)}):\n"
+        f"{_plain(supported, ['label', 'arch'])}\n\n"
+        f"b) Validation fails (kept in known_unsupported) ({len(unsupported)}):\n"
+        f"{_plain(unsupported, ['label', 'arch', 'urn', 'logs_url', 'reason'])}"
+    )
+
+    html_body = (
+        "<div style='font-family:Segoe UI,sans-serif;color:#24292e'>"
+        f"<p style='font-size:14px'>Phase 3 validated <b>{processed}</b> distro(s) with LISA &mdash; "
+        f"<b>{len(supported)}</b> supported, <b>{len(unsupported)}</b> unsupported.</p>"
+        + _table_html(
+            f"a) Validation successful (known_supported) ({len(supported)})",
+            [("label", "Distro"), ("arch", "Arch")],
+            supported,
+        )
+        + _table_html(
+            f"b) Validation fails (kept in known_unsupported) ({len(unsupported)})",
+            [
+                ("label", "Distro"),
+                ("arch", "Arch"),
+                ("urn", "Image URN"),
+                ("logs_url", "Logs URL"),
+                ("reason", "Reason"),
+            ],
+            unsupported,
+        )
+        + "</div>"
+    )
+    _notify(subject, plain, html_body=html_body)
 
 
 # ---------------------------------------------------------------------------
@@ -224,11 +270,12 @@ def run(jobs: List[LisaJob]) -> Dict[str, int]:
         urn = _image_urn(job)
         state, reason = process_job(job)
         if state == "known_supported":
-            supported.append({"label": label, "urn": urn, "logs_url": logs_url})
+            supported.append({"label": label, "arch": job.arch})
         else:
             unsupported.append(
                 {
                     "label": label,
+                    "arch": job.arch,
                     "urn": urn,
                     "logs_url": logs_url,
                     "reason": reason or "validation failed",
