@@ -1,5 +1,10 @@
 azure-identity>=1.16.0
-azure-mgmt-compute>=31.0.0
+# Must stay <31: the Phase 3 LISA engine pins azure-mgmt-compute ~=30.5.0, and
+# setup_lisa.sh installs these project requirements into the same venv. 31+
+# (e.g. 38.x) drops msrest-style models (ResourceSkuZoneDetails.additional_
+# properties) that LISA's azure platform relies on, breaking VM deployment.
+# Phase 1 only uses the stable virtual_machine_images list/get APIs, present here.
+azure-mgmt-compute>=30.5.0,<31
 azure-communication-email>=1.0.0
 requests>=2.31.0
 PyYAML>=6.0
