@@ -31,7 +31,7 @@ PMC prod (Phase 2 owns that check).
 ```mermaid
 flowchart TD
     A["lisa_jobs.json<br/>(Phase 2 output)"] --> B{"run_phase3.py<br/>driver"}
-    B -->|per distro| C["lisa run<br/>aznfs_validation.yml<br/>concurrency:3, per-env RG"]
+    B -->|per distro| C["lisa run<br/>aznfs_validation.yml<br/>concurrency:1, pinned RG"]
     C --> D["lisa.junit.xml<br/>(machine-readable results)"]
     D --> E{"all cases<br/>passed?"}
     E -->|yes| F["job.lisa_passed = true"]
@@ -55,9 +55,9 @@ Three moving parts, all already in this folder:
 1. **Read** Phase 2's `lisa_jobs.json` (one entry per distro: image URN,
    published package URL + version, arch).
 2. **Validate** each distro: the driver runs `lisa run` on the base runbook with
-   `-v` overrides. All 3 cases run **in parallel** (`concurrency:3`), each in its
-   **own auto-deleted resource group** (empty `resource_group_name`). The
-   `junit` notifier writes `lisa.junit.xml`.
+   `-v` overrides. All 3 cases run **in parallel** (`concurrency:3`) inside one
+   **pinned resource group** (`lisa-aznfs-phase3`), so distros run **serially**
+   (one env at a time). The `junit` notifier writes `lisa.junit.xml`.
 3. **Score**: the driver parses that XML — a distro **passes** when it has at
    least one executed case and **zero** failures; on a failure it extracts the
    failing `[Tier N: step]` tag.
@@ -73,18 +73,20 @@ Three moving parts, all already in this folder:
 ## 3. Running it
 
 ```bash
-# from the repo root, with the LISA venv active and `az login` done
+# from the repo root, with the LISA venv active and `az login` done.
+# RG is pinned (PHASE3_RESOURCE_GROUP=lisa-aznfs-phase3) -> the driver forces
+# --concurrency 1 / --max-parallel-distros 1 (one shared RG can't run envs in
+# parallel). Unset PHASE3_RESOURCE_GROUP for per-env RGs + real parallelism.
 python -m phase3.run_phase3 path/to/jobs.json \
-  --subscription-id 8ffe006d-4aa2-4eb6-bc3c-f33092ef804a \
-  --concurrency 3 \
-  --max-parallel-distros 4
+  --subscription-id 8ffe006d-4aa2-4eb6-bc3c-f33092ef804a
 ```
 
-- `--concurrency 3` — the 3 cases of **one** distro run at once (~17 min wall
-  clock instead of ~50).
-- `--max-parallel-distros 4` — up to 4 **distros** validate simultaneously. VMs
-  in flight ≈ `max_parallel_distros × concurrency × 1`; each is 2 vCPUs, so bound
-  this by your regional vCPU quota (e.g. 4 × 3 = 12 VMs = 24 vCPUs).
+- Pinned RG = least privilege: the MI needs only Virtual Machine + Network +
+  Storage Account Contributor on `lisa-aznfs-phase3` (no subscription-scope
+  resourcegroups/write). Trade-off: distros run one at a time.
+- To parallelize: unset `PHASE3_RESOURCE_GROUP`, then `--max-parallel-distros N`
+  runs N distros at once. VMs in flight ≈ `max_parallel_distros × 2 vCPUs`;
+  bound by regional vCPU quota.
 
 An example input is in [`examples/jobs.example.json`](examples/jobs.example.json).
 
