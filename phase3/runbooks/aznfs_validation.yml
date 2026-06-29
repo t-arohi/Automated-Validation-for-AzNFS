@@ -32,12 +32,13 @@ variable:
     value: ""
   - name: location
     value: "centralindia"
-  # Empty => LISA creates a fresh RG per environment (REQUIRED for concurrency>1;
-  # each env gets its own RG/VNet/NSG/key, auto-deleted when keep_environment=no).
-  # Set to a name to pin all envs into one existing RG (forces concurrency=1, and
-  # reuses that RG's VNet). Pin only when you must use a specific pre-made network.
+  # Pinned to one pre-created RG (default below) so the runner identity only
+  # needs Network/Storage Account/Virtual Machine Contributor on THIS RG, not
+  # subscription-scope rights. A pinned RG shares one ARM deployment name + SSH
+  # key, so envs run SERIALLY (concurrency=1). Set empty to make LISA create a
+  # fresh RG per env (faster, parallel) -- but that needs sub-scope rights.
   - name: resource_group_name
-    value: ""
+    value: "lisa-aznfs-phase3"
   - name: marketplace_image
     value: "RedHat:RHEL:9_5:latest"
   - name: vm_size
