@@ -12,6 +12,11 @@ on:
   workflow_dispatch:
     # Manual trigger (e.g. re-run after a package is manually published to prod
     # so a pending_publish distro flows through to validation).
+    inputs:
+      distros:
+        description: "Comma-separated distro_label allow-list (empty = all). e.g. 'Ubuntu 22.04,RHEL 9'"
+        required: false
+        default: ""
 
 # Serialize on the shared SQLite DB cache. Phase 2 AND Phase 3 both mutate
 # marketplace.db, so they must run one-at-a-time under ONE concurrency group to
@@ -118,7 +123,7 @@ jobs:
           # --- Paths ---
           DB_PATH: marketplace.db
         run: |
-          python -m src.phase2.run --input output/needs_validation.json --output output/lisa_jobs.json
+          python -m src.phase2.run --input output/needs_validation.json --output output/lisa_jobs.json --distros "${{ inputs.distros }}"
 
       # ----------------------------------------------------------------
       # 6. Upload the Phase 3 hand-off (LISA jobs) as an artifact.
