@@ -7,10 +7,10 @@ over by Phase 1 the orchestrator walks three checks built straight on the public
     Gate 1  repo exists?      GET /<distro>/<version>/prod/ returns 200
               no  -> DB known_unsupported  (reason: "repo is missing")
     Gate 2  package exists?   the aznfs dir lists a 0.3.x build for this arch
-              no  -> DB pending_publish    (reason: publish manually; retried next run)
+              no  -> DB known_unsupported  (email flags pending_publish: publish manually)
     Gate 3  validation needed?  numeric-latest 0.3.x prod version p  vs  DB last_validated_version
               no  (p == v_last) -> DB known_supported  (trusted)
-              yes (first time, or p > v_last) -> emit LISA job + DB pending_validation
+              yes (first time, or p > v_last) -> emit LISA job; DB state UNCHANGED (Phase 3 sets it)
 
 Phase 2 sends EXACTLY ONE e-mail per run: the end-of-run summary, which lists
 every distro and -- for the failing ones -- the reason. No per-distro mail is
@@ -282,8 +282,11 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike) -> Phase2Result:
             )
         # (b) supported distro already listed in AZNFS-mount/packages.csv -> the
         # csv does not need a change; a human just needs to publish the package.
+        # validation_state stays known_unsupported (only 3 states are used:
+        # known_supported / known_unsupported / unknown); the email still flags
+        # it as pending_publish so a human knows to publish + re-invoke.
         if _packages_csv_mentions_distro(label):
-            db.set_validation_state(ident, PENDING_PUBLISH)
+            db.set_validation_state(ident, KNOWN_UNSUPPORTED)
             return Phase2Result(
                 "pending_publish",
                 reason="no AzNFS packages found on prod and packages.csv does not "
@@ -310,7 +313,9 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike) -> Phase2Result:
         return Phase2Result("trusted", reason=f"already validated on prod (v{p})")
 
     lisa_job = _make_lisa_job(entry, distro, version, family, best, p)
-    db.set_validation_state(ident, PENDING_VALIDATION)
+    # Emit the LISA job WITHOUT changing validation_state: it stays whatever it
+    # was (unknown for a fresh distro). Phase 3 sets known_supported/-unsupported
+    # on its verdict. Only 3 states ever persist.
     reason = f"validate v{p}" + (f" (was v{v_last})" if v_last else " (first validation)")
     return Phase2Result("to_phase3", reason=reason, lisa_job=lisa_job)
 
