@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -78,9 +79,12 @@ def _overrides(job: LisaJob, subscription_id: str, concurrency: int) -> List[str
         "aznfs_expected_version": job.aznfs_version,
         "keep_environment": "no",
         "concurrency": str(concurrency),
-        # empty resource_group_name => one auto-deleted RG per environment
-        # (required for concurrency > 1); see the runbook header.
-        "resource_group_name": "",
+        # PHASE3_RESOURCE_GROUP pins all envs into one pre-created RG so the
+        # runner MI only needs Network/Storage/VM Contributor on that RG (no
+        # subscription resourcegroups/write). A pinned RG shares one ARM
+        # deployment name + SSH key, so concurrency is forced to 1 in main().
+        # Empty => one auto-deleted RG per env (needs sub-scope rights).
+        "resource_group_name": os.environ.get("PHASE3_RESOURCE_GROUP", "lisa-aznfs-phase3"),
     }
     args: List[str] = []
     for key, value in pairs.items():
@@ -202,7 +206,8 @@ def validate_distros(
 
 def main() -> int:
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     parser = argparse.ArgumentParser(description="Phase 3 automation driver.")
     parser.add_argument(
@@ -220,6 +225,18 @@ def main() -> int:
         help="Distros validated at once (bound by vCPU quota).",
     )
     args = parser.parse_args()
+
+    # A pinned resource group shares one ARM deployment name + SSH key, so envs
+    # cannot run in parallel: force serial (1 case, 1 distro at a time).
+    if os.environ.get("PHASE3_RESOURCE_GROUP", "lisa-aznfs-phase3"):
+        if args.concurrency != 1 or args.max_parallel_distros != 1:
+            logger.warning(
+                "PHASE3_RESOURCE_GROUP=%s pins one RG -> forcing concurrency=1 "
+                "and max_parallel_distros=1",
+                os.environ.get("PHASE3_RESOURCE_GROUP", "lisa-aznfs-phase3"),
+            )
+        args.concurrency = 1
+        args.max_parallel_distros = 1
 
     jobs = record_result.load_jobs(args.jobs_json)
     if not jobs:
