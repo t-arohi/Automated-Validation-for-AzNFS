@@ -1,0 +1,45 @@
+name: Chain watchdog - phase hand-off
+
+# Phase 2 fires on Phase 1's workflow_run; Phase 3 on Phase 2's. That event is
+# best-effort, so a dropped event silently skips the next phase and no e-mail is
+# sent. This watchdog runs hourly and e-mails when an upstream phase succeeded
+# but the next did not start within CHAIN_GRACE_MIN. Assumes phases are healthy.
+on:
+  schedule:
+    - cron: "30 06 * * *"   # ~3h after the 03:30 scan; covers the full chain
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on:
+      - self-hosted
+      - azure-vm-marketplace
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check phase hand-offs
+        env:
+          PYTHONPATH: scripts
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_GRACE_MIN: "120"
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_MANAGED_IDENTITY_CLIENT_ID: ${{ vars.AZURE_MANAGED_IDENTITY_CLIENT_ID }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_MANAGED_IDENTITY_CLIENT_ID }}
+          ACS_ENDPOINT: ${{ vars.ACS_ENDPOINT }}
+          ACS_SENDER: ${{ vars.ACS_SENDER }}
+          NOTIFY_RECIPIENTS: ${{ vars.NOTIFY_RECIPIENTS }}
+        run: python scripts/chain_watchdog.py
