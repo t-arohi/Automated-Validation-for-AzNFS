@@ -93,7 +93,8 @@ API, no tux-dev, no ADO build, no corp proxy.
 | Runs | `python -m phase3.run_phase3 output/lisa_jobs.json --concurrency <n> --max-parallel-distros <n>` after `az login --identity` |
 | Concurrency | `marketplace-db` (shared with Phase 2) |
 
-Phase 3 provisions **real Azure VMs** via the runner's managed identity. Parallelism
+Phase 3 provisions **real Azure VMs** via the runner's managed identity into one
+pinned resource group (`lisa-aznfs-phase3`), so envs run serially. Parallelism
 is bounded by the subscription's regional vCPU quota (`PHASE3_CONCURRENCY` cases per
 distro, `PHASE3_MAX_PARALLEL_DISTROS` distros at once).
 
@@ -338,16 +339,20 @@ Optional **repository variables**:
 | `PROD_REPO_BASE` | Phase 2 | `https://packages.microsoft.com` |
 | `HTTP_TIMEOUT` | Phase 2 | `30` (seconds) |
 | `LISA_VENV` | Phase 3 | `$HOME/lisa-venv` |
-| `PHASE3_CONCURRENCY` | Phase 3 | `3` (LISA cases in parallel per distro) |
+| `PHASE3_CONCURRENCY` | Phase 3 | `1` (forced to 1 while a pinned RG is set) |
 | `PHASE3_MAX_PARALLEL_DISTROS` | Phase 3 | `1` (distros validated at once) |
+| `PHASE3_RESOURCE_GROUP` | Phase 3 | `lisa-aznfs-phase3` (pre-created RG all envs share) |
 
 Required RBAC on the Managed Identity:
 
-- `Reader` on the subscription (so the Compute API can list images and Phase 3
-  can provision VMs).
+- `Reader` on the subscription (so the Compute API can list marketplace images).
 - `Communication and Email Service Owner` on the ACS resource (so the MI can
   send via the Email REST API).
-- Permissions to create/delete VMs and their resource groups for Phase 3.
+- On the pinned Phase 3 RG `lisa-aznfs-phase3` (least privilege, scoped to the
+  RG — no subscription-wide rights, no `resourcegroups/write`):
+  - `Virtual Machine Contributor` — create/delete the test VMs + disks.
+  - `Network Contributor` — VNet, NSG, public IP, NIC, private endpoint + DNS.
+  - `Storage Account Contributor` — storage account + NFS file share.
 
 Required runner: a self-hosted runner registered to the repo with labels
 `self-hosted` and `azure-vm-marketplace` (every workflow targets that exact
