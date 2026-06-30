@@ -91,10 +91,7 @@ python -m phase3.run_phase3 path/to/jobs.json \
 An example input is in [`examples/jobs.example.json`](examples/jobs.example.json).
 
 > The driver runs each distro as its own `lisa run` for **simple, reliable
-> result attribution** (one junit file per distro). The
-> [`runbooks/aznfs_multidistro.yml`](runbooks/aznfs_multidistro.yml) `batch`
-> combinator is the alternative single-run form (all distros in one LISA
-> process) used for manual multi-distro runs.
+> result attribution** (one junit file per distro).
 
 ---
 
