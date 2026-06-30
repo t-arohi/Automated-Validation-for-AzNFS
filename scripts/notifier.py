@@ -117,13 +117,15 @@ def _ordered_states(buckets: dict[str, list[dict]]) -> list[str]:
     return _STATE_ORDER + extras
 
 
-def _reminder_table_html(distros: list[dict]) -> str:
+def _reminder_table_html(distros: list[dict], with_reason: bool = False) -> str:
     cols = [
         ("distro_label", "Distro"),
         ("version", "Latest version"),
         ("publishers", "Publishers"),
         ("sku_count", "# SKUs"),
     ]
+    if with_reason:
+        cols.append(("reason", "Reason"))
     head = "".join(
         f"<th style='text-align:left;padding:4px 8px;background:#f3f3f3'>{lbl}</th>"
         for _, lbl in cols
@@ -184,11 +186,14 @@ def send_monthly_reminder(
         plain_parts.append(f"[{_STATE_TITLES.get(st, st)}] ({len(rows)})")
         if rows:
             for d in rows:
-                plain_parts.append(
+                line = (
                     f"  - {d.get('distro_label')} "
                     f"(latest {d.get('version')}; {_fmt(d.get('publishers', []))}; "
                     f"{d.get('sku_count')} SKU(s))"
                 )
+                if st == "known_unsupported" and d.get("reason"):
+                    line += f" -- {d['reason']}"
+                plain_parts.append(line)
         else:
             plain_parts.append("  (none)")
         plain_parts.append("")
@@ -198,12 +203,14 @@ def send_monthly_reminder(
     for st in states:
         rows = buckets.get(st, [])
         title = _STATE_TITLES.get(st, st)
+        # The verdict reason only applies to the known_unsupported bucket.
+        with_reason = st == "known_unsupported"
         sections += (
             f"<h4 style='font-family:Segoe UI,sans-serif;margin:12px 0 4px'>"
             f"{html.escape(title)} "
             f"<span style='color:#888;font-weight:normal'>({len(rows)})</span></h4>"
             + (
-                _reminder_table_html(rows)
+                _reminder_table_html(rows, with_reason=with_reason)
                 if rows
                 else "<p style='font-family:Segoe UI,sans-serif;color:#888'>(none)</p>"
             )
