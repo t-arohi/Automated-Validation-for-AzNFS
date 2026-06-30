@@ -408,6 +408,16 @@ def main() -> int:
                 continue
 
             for offer in offers:
+                # Skip PRIVATE / restricted-audience offers the subscription
+                # cannot deploy (e.g. Canonical "Pro - Advanced SLA"). They show
+                # up in the listing but fail Phase 3 provisioning with
+                # "Offer ... not found / restricted audience"; the same releases
+                # exist in public offers, so dropping these keeps coverage.
+                offer_l = (offer or "").lower()
+                if any(p in offer_l for p in config.EXCLUDED_OFFER_SUBSTRINGS):
+                    logger.info("    Skipping restricted offer: %s", offer)
+                    continue
+
                 skus = azure_client.list_skus(client, region, publisher, offer)
 
                 for sku in skus:
