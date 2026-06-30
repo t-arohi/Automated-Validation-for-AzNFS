@@ -360,6 +360,18 @@ def test_run_phase2_swallows_per_entry_errors_into_summary():
     assert s["errors"] and "error" in s["errors"][0][1].lower()
 
 
+def test_run_phase2_no_entries_sends_no_email():
+    # Like Phase 1 (silent with no new distros), Phase 2 must NOT e-mail when
+    # there are no entries to process (empty Phase 1 hand-off).
+    prod = FakeProd()
+    db, notifier = FakeDb(), FakeNotifier()
+
+    jobs = run_phase2([], prod, db, notifier, lisa_jobs_path=None)
+
+    assert jobs == []
+    assert notifier.summaries == []  # no e-mail
+
+
 def test_run_phase2_dedups_jobs_by_url_keeping_latest_version(tmp_path):
     # Many RHEL 9 SKUs (9.0 .. 9.8) all resolve to rhel/9 -> ONE x86 job
     # (the latest marketplace version) + ONE arm64 job (distinct url). Rocky 8
