@@ -361,13 +361,13 @@ def test_run_phase2_swallows_per_entry_errors_into_summary():
 
 
 def test_run_phase2_dedups_jobs_by_url_keeping_latest_version(tmp_path):
-    # Many CentOS 7 SKUs (7.3 .. 7.9) all resolve to centos/7 -> ONE x86 job
+    # Many RHEL 9 SKUs (9.0 .. 9.8) all resolve to rhel/9 -> ONE x86 job
     # (the latest marketplace version) + ONE arm64 job (distinct url). Rocky 8
     # and Rocky 9 are distinct urls -> two more jobs. Goal: distinct urls only.
     prod = FakeProd(
-        repos={"centos": {"7"}, "rocky": {"8", "9"}},
+        repos={"rhel": {"9"}, "rocky": {"8", "9"}},
         packages={
-            ("centos", "7"): ["aznfs-0.3.458-1.x86_64.rpm", "aznfs-0.3.458-1.aarch64.rpm"],
+            ("rhel", "9"): ["aznfs-0.3.458-1.x86_64.rpm", "aznfs-0.3.458-1.aarch64.rpm"],
             ("rocky", "8"): ["aznfs-0.3.458-1.x86_64.rpm"],
             ("rocky", "9"): ["aznfs-0.3.458-1.x86_64.rpm"],
         },
@@ -376,8 +376,8 @@ def test_run_phase2_dedups_jobs_by_url_keeping_latest_version(tmp_path):
     out = tmp_path / "lisa_jobs.json"
 
     def c(**kw):
-        base = dict(publisher="OpenLogic", image="CentOS", family="yum",
-                    region="eastus", architecture="x86_64", distro_label="CentOS 7",
+        base = dict(publisher="RedHat", image="RHEL", family="yum",
+                    region="eastus", architecture="x86_64", distro_label="RHEL 9",
                     last_validated_version="")
         base.update(kw)
         return base
@@ -389,10 +389,10 @@ def test_run_phase2_dedups_jobs_by_url_keeping_latest_version(tmp_path):
         return base
 
     entries = [
-        c(sku="7.3", version="7.3.20210812"),
-        c(sku="7_9", version="7.9.2023030700"),
-        c(sku="7_9-gen2", version="7.9.2023030701"),               # latest x86 -> representative
-        c(sku="7_9-arm64", version="7.9.2024020802", architecture="arm64"),
+        c(sku="9_0", version="9.0.2022010100"),
+        c(sku="9_8", version="9.8.2026010100"),
+        c(sku="9-lvm-gen2", version="9.8.2026062413"),             # latest x86 -> representative
+        c(sku="9-arm64", version="9.8.2026070101", architecture="arm64"),
         rk(sku="8-base", version="8.9.20231119", distro_label="Rocky 8"),
         rk(sku="9-base", version="9.6.20250531", distro_label="Rocky 9"),
     ]
@@ -401,11 +401,11 @@ def test_run_phase2_dedups_jobs_by_url_keeping_latest_version(tmp_path):
 
     urls = [j["aznfs_package_url"] for j in jobs]
     assert len(urls) == len(set(urls))            # every url distinct
-    assert len(jobs) == 4                         # CentOS7 x86, CentOS7 arm, Rocky8, Rocky9
-    centos = [j for j in jobs if j["distro_label"] == "CentOS 7"]
-    x86 = next(j for j in centos if j["arch"] == "x86_64")
-    assert x86["version"] == "7.9.2023030701"     # latest version kept
-    assert {j["arch"] for j in centos} == {"x86_64", "arm64"}
+    assert len(jobs) == 4                         # RHEL9 x86, RHEL9 arm, Rocky8, Rocky9
+    rhel = [j for j in jobs if j["distro_label"] == "RHEL 9"]
+    x86 = next(j for j in rhel if j["arch"] == "x86_64")
+    assert x86["version"] == "9.8.2026062413"     # latest version kept
+    assert {j["arch"] for j in rhel} == {"x86_64", "arm64"}
     assert any(j["aznfs_package_url"].endswith("/rocky/8/prod/Packages/a/aznfs-0.3.458-1.x86_64.rpm") for j in jobs)
     assert any(j["aznfs_package_url"].endswith("/rocky/9/prod/Packages/a/aznfs-0.3.458-1.x86_64.rpm") for j in jobs)
     # The summary's to_phase3 table mirrors the deduped jobs (one row per url).
