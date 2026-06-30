@@ -99,6 +99,36 @@ def load_entries(path: str) -> list[dict]:
     return data
 
 
+def entries_from_db(db_mod, db_path: str, wanted: set[str]) -> list[dict]:
+    """Build Phase 2 entries straight from the DB for selected distro_labels.
+
+    A manual Phase 2 run usually depends on Phase 1's ``needs_validation.json``,
+    which is delta-only -- it carries just the newly found/updated SKUs, so a
+    distro you want to re-validate is often absent. This pulls every tracked SKU
+    row from the DB, keeps the wanted ``distro_label`` values, and collapses them
+    to one representative SKU per (distro_label, architecture) -- the newest
+    marketplace ``version`` -- so Phase 2 can validate exactly the selected
+    distros without re-running Phase 1. The DB rows already carry every field
+    Phase 2 needs (publisher, image, sku, region, architecture, family,
+    distro_label, version, last_validated_version), so they are used as-is and
+    bypass the ``enrich_and_merge`` skip filter (this is a deliberate, explicit
+    re-validation of the selected distros, regardless of their current state).
+    """
+    rows = db_mod.get_all_records(db_path)
+    if wanted:
+        rows = [r for r in rows if (r.get("distro_label") or "").casefold() in wanted]
+    chosen: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        key = (r.get("distro_label", ""), r.get("architecture", ""))
+        cur = chosen.get(key)
+        if cur is None or (r.get("version", "") > cur.get("version", "")):
+            chosen[key] = r
+    return sorted(
+        chosen.values(),
+        key=lambda r: (r.get("distro_label", ""), r.get("architecture", "")),
+    )
+
+
 # DB ``validated`` states that mean Phase 2 is already finished with an image and
 # must NOT re-process it. Skipping these is what makes a manual re-run idempotent
 # against a reused Phase 1 artifact, and what stops Phase 2 from re-dispatching a
@@ -227,31 +257,51 @@ def main(argv: list[str] | None = None) -> int:
         help="comma-separated distro_label allow-list (case-insensitive); "
              "empty = all. e.g. 'Ubuntu 22.04,RHEL 9'",
     )
+    parser.add_argument(
+        "--from-db", action="store_true",
+        help="build entries straight from the DB for the --distros selection "
+             "(one rep SKU per distro+arch, newest version) instead of reading "
+             "Phase 1's delta-only needs_validation.json. Use for a manual "
+             "re-validation of specific distros without re-running Phase 1.",
+    )
     parser.add_argument("--dry-run", action="store_true",
                         help="resolve clients + input and report counts, but do not run gates")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-    try:
-        entries = load_entries(args.input)
-    except (OSError, ValueError) as exc:
-        logger.error("Cannot read Phase 1 input %s: %s", args.input, exc)
-        return 2
-
     wanted = {d.strip().casefold() for d in args.distros.split(",") if d.strip()}
-    if wanted:
-        before = len(entries)
-        entries = [e for e in entries if e.get("distro_label", "").casefold() in wanted]
-        logger.info("Distro filter %s: %d -> %d entr(ies)", sorted(wanted), before, len(entries))
-
-    if args.dry_run:
-        logger.info("Dry run: %d entr(ies) from %s", len(entries), args.input)
-        return 0
 
     try:
         notifier_mod, db_mod = _load_phase1()
+    except Exception:
+        logger.exception("Could not load Phase 1 helpers (notifier/db_manager)")
+        return 2
+
+    if args.from_db:
+        # Pull the selected distros straight from the DB (no needs_validation.json).
+        entries = entries_from_db(db_mod, DB_PATH, wanted)
+        logger.info(
+            "From-DB mode: %d entr(ies) for %s",
+            len(entries), sorted(wanted) if wanted else "ALL distros",
+        )
+    else:
+        try:
+            entries = load_entries(args.input)
+        except (OSError, ValueError) as exc:
+            logger.error("Cannot read Phase 1 input %s: %s", args.input, exc)
+            return 2
+        if wanted:
+            before = len(entries)
+            entries = [e for e in entries if e.get("distro_label", "").casefold() in wanted]
+            logger.info("Distro filter %s: %d -> %d entr(ies)", sorted(wanted), before, len(entries))
         entries = enrich_and_merge(entries, db_mod, DB_PATH)
+
+    if args.dry_run:
+        logger.info("Dry run: %d entr(ies)", len(entries))
+        return 0
+
+    try:
         run(
             entries=entries,
             notifier_obj=Phase1NotifierAdapter(notifier_mod),
