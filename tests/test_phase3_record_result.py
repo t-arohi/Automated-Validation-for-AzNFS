@@ -82,6 +82,26 @@ def test_record_validation_updates_matching_row(tmp_path, monkeypatch):
     assert row[1] is not None  # last_validated stamped
 
 
+def test_record_validation_stores_reason(tmp_path, monkeypatch):
+    # _make_db's schema has NO reason column, so this also exercises the
+    # idempotent _ensure_phase3_columns auto-migration.
+    db = _make_db(tmp_path)
+    monkeypatch.setattr(record_result.config, "DB_PATH", str(db))
+    monkeypatch.setattr(record_result.config, "PHASE3_SCHEMA_PATH", "/nonexistent.sql")
+
+    record_result._record_validation(
+        {"publisher": "redhat", "image": "rhel", "sku": "9_5",
+         "region": "eastus", "architecture": "x86_64"},
+        "known_unsupported",
+        reason="[Tier 4: mount] failed to mount via aznfs",
+    )
+
+    conn = sqlite3.connect(str(db))
+    reason = conn.execute("SELECT reason FROM images").fetchone()[0]
+    conn.close()
+    assert reason == "[Tier 4: mount] failed to mount via aznfs"
+
+
 # ---------------------------------------------------------------------------
 # run(): one summary e-mail; pass -> supported, fail -> unsupported + reason
 # ---------------------------------------------------------------------------
