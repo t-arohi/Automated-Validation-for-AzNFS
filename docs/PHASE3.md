@@ -143,8 +143,7 @@ marketplace-distro-scanner/
     │   ├── __init__.py
     │   └── aznfs_validation.py           # the LISA test suite (3 cases / 5 tiers)
     ├── runbooks/
-    │   ├── aznfs_validation.yml          # LISA runbook (platform + aznfs_* inputs)
-    │   └── aznfs_multidistro.yml         # batch combinator for many distros at once
+    │   └── aznfs_validation.yml          # LISA runbook (platform + aznfs_* inputs)
     ├── examples/
     │   └── jobs.example.json             # sample Phase 2 hand-off
     └── orchestrator/                     # record the verdict (NOT a LISA test)
@@ -234,40 +233,6 @@ lisa run -r .../phase3/runbooks/aznfs_validation.yml \
 Bound `concurrency` by your subscription's regional vCPU quota (each VM here is
 2 vCPUs). To force the old serial/pinned mode: `-v resource_group_name:<rg>
 -v concurrency:1`.
-
-## Running multiple distros at once
-
-Use the dedicated multi-distro runbook
-[`aznfs_multidistro.yml`](../phase3/runbooks/aznfs_multidistro.yml). It
-`include`s the base runbook and adds a **`batch` combinator** that pairs each
-distro with its matching package URL + version (a single fixed URL can't work
-across families — RHEL needs an `.rpm`, Ubuntu/Debian a `.deb`):
-
-```yaml
-combinator:
-  type: batch
-  items:
-    - marketplace_image: "RedHat:RHEL:9_5:latest"
-      aznfs_package_url: "https://packages.microsoft.com/rhel/9.0/prod/Packages/a/aznfs-0.3.458-1.x86_64.rpm"
-      aznfs_expected_version: "0.3.458"
-    - marketplace_image: "canonical 0001-com-ubuntu-server-jammy 22_04-lts latest"
-      aznfs_package_url: "https://packages.microsoft.com/ubuntu/22.04/prod/pool/main/a/aznfs/aznfs_0.3.458_amd64.deb"
-      aznfs_expected_version: "0.3.458"
-```
-
-```bash
-# items x cases = environments (2 distros x 3 cases = 6 VMs). Set concurrency
-# to that to run them all simultaneously:
-lisa run -r .../phase3/runbooks/aznfs_multidistro.yml \
-  -v subscription_id:<sub> -v concurrency:6 -v keep_environment:no
-```
-
-> **Package versioning.** Phase 2 tracks the AzNFS `0.3.x` series on PMC prod, so
-> the URLs here use that line (RHEL `.rpm`, Ubuntu/Debian `.deb`). Always confirm
-> the exact URL resolves (`curl -sI <url>`) before adding a distro. Debian's PMC
-> pool path differs from Ubuntu's and currently 404s at the obvious location —
-> confirm its real path before adding Debian items.
-
 
 ## Known-good test inputs (RHEL)
 
