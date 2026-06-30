@@ -56,6 +56,8 @@ def _lazy_migrate(conn: sqlite3.Connection) -> None:
         adds.append("ALTER TABLE images ADD COLUMN distro_label TEXT NOT NULL DEFAULT ''")
     if "last_validated_version" not in cols:
         adds.append("ALTER TABLE images ADD COLUMN last_validated_version TEXT NOT NULL DEFAULT ''")
+    if "reason" not in cols:
+        adds.append("ALTER TABLE images ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
     if adds:
         logger.warning(
             "Legacy schema detected — adding new columns. "
@@ -210,6 +212,7 @@ def set_validation_state(
     identity: tuple[str, str, str, str, str],
     state: str,
     last_validated_version: str | None = None,
+    reason: str | None = None,
 ) -> bool:
     """Phase 2/3: update the validation verdict for one image row.
 
@@ -217,13 +220,17 @@ def set_validation_state(
     (publisher, image, sku, region, architecture) — the same key used by
     check_and_upsert / get_image_record. ``state`` must be one of
     'known_supported', 'known_unsupported', 'pending_publish',
-    'pending_validation', 'unknown'. The human-actionable reason for a
-    known_unsupported verdict is delivered by e-mail, not stored here.
+    'pending_validation', 'unknown'.
 
     ``last_validated_version`` is the AzNFS version a successful Phase 3 run
     just validated on prod; when given it is recorded so the next Phase 2 run
     can skip re-validating the same version. Leave it None to preserve the
-    stored value. All other Phase 1 columns are preserved.
+    stored value.
+
+    ``reason`` is the human-readable verdict reason (e.g. why a row is
+    known_unsupported); pass "" to clear it on a known_supported verdict, or
+    leave it None to preserve the stored value. It is surfaced in the monthly
+    digest's known_unsupported table. All other Phase 1 columns are preserved.
 
     Returns True if a row was updated, False if no matching row exists.
     """
@@ -235,36 +242,30 @@ def set_validation_state(
     now = _now_iso()
     conn = _connect(db_path)
     try:
-        if last_validated_version is None:
-            cur = conn.execute(
-                """
-                UPDATE images
-                   SET validated    = ?,
-                       last_checked = ?
-                 WHERE publisher    = ?
-                   AND image        = ?
-                   AND sku          = ?
-                   AND region       = ?
-                   AND architecture = ?
-                """,
-                (state, now, publisher, image, sku, region, architecture),
-            )
-        else:
-            cur = conn.execute(
-                """
-                UPDATE images
-                   SET validated              = ?,
-                       last_validated_version = ?,
-                       last_checked           = ?
-                 WHERE publisher    = ?
-                   AND image        = ?
-                   AND sku          = ?
-                   AND region       = ?
-                   AND architecture = ?
-                """,
-                (state, last_validated_version, now,
-                 publisher, image, sku, region, architecture),
-            )
+        # Ensure newer columns (reason, …) exist before we write them, so a
+        # manual Phase 2 run against a DB that predates them still works.
+        _lazy_migrate(conn)
+        set_cols = ["validated = ?", "last_checked = ?"]
+        params: list = [state, now]
+        if last_validated_version is not None:
+            set_cols.append("last_validated_version = ?")
+            params.append(last_validated_version)
+        if reason is not None:
+            set_cols.append("reason = ?")
+            params.append(reason)
+        params.extend([publisher, image, sku, region, architecture])
+        cur = conn.execute(
+            f"""
+            UPDATE images
+               SET {", ".join(set_cols)}
+             WHERE publisher    = ?
+               AND image        = ?
+               AND sku          = ?
+               AND region       = ?
+               AND architecture = ?
+            """,
+            params,
+        )
         conn.commit()
         if cur.rowcount == 0:
             logger.warning(
