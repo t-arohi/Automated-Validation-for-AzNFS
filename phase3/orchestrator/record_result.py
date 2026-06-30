@@ -92,21 +92,27 @@ def _image_urn(job: LisaJob) -> str:
 # SQLite update (extends the Phase 1 images table with last_validated)
 # ---------------------------------------------------------------------------
 def _ensure_phase3_columns(conn: sqlite3.Connection) -> None:
-    """Add the last_validated column if it does not exist (idempotent)."""
-    try:
-        conn.execute("ALTER TABLE images ADD COLUMN last_validated TEXT")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # duplicate column name - already added in a prior run
+    """Add the columns Phase 3 writes if they do not exist (idempotent)."""
+    for ddl in (
+        "ALTER TABLE images ADD COLUMN last_validated TEXT",
+        "ALTER TABLE images ADD COLUMN reason TEXT NOT NULL DEFAULT ''",
+    ):
+        try:
+            conn.execute(ddl)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # duplicate column name - already added in a prior run
 
 
-def _record_validation(image_key: Dict[str, str], validated: str) -> None:
-    """Set validated + last_validated on the matching images row.
+def _record_validation(image_key: Dict[str, str], validated: str, reason: str = "") -> None:
+    """Set validated + last_validated (+ reason) on the matching images row.
 
     Matches on (publisher, image, sku, region, architecture) - the SAME identity
     Phase 1/Phase 2 use - so the row is found (the earlier version matched on
     `version`, which is 'latest' in the job and never equals the stored
-    marketplace version, so it updated zero rows).
+    marketplace version, so it updated zero rows). ``reason`` is the verdict
+    reason (empty on a pass, the failure reason on known_unsupported); it is
+    surfaced in the monthly digest's known_unsupported table.
     """
     now = _now_iso()
     conn = sqlite3.connect(config.DB_PATH)
@@ -117,7 +123,8 @@ def _record_validation(image_key: Dict[str, str], validated: str) -> None:
             UPDATE images
                SET validated      = ?,
                    last_validated = ?,
-                   last_modified  = ?
+                   last_modified  = ?,
+                   reason         = ?
              WHERE publisher    = ?
                AND image        = ?
                AND sku          = ?
@@ -128,6 +135,7 @@ def _record_validation(image_key: Dict[str, str], validated: str) -> None:
                 validated,
                 now,
                 now,
+                reason,
                 image_key["publisher"],
                 image_key["image"],
                 image_key["sku"],
@@ -253,9 +261,9 @@ def _send_summary(
 def process_job(job: LisaJob) -> Tuple[str, str]:
     """Record one distro's verdict. Returns (validated_state, failure_reason)."""
     if job.lisa_passed:
-        _record_validation(job.image_key(), "known_supported")
+        _record_validation(job.image_key(), "known_supported", reason="")
         return "known_supported", ""
-    _record_validation(job.image_key(), "known_unsupported")
+    _record_validation(job.image_key(), "known_unsupported", reason=job.failure_reason)
     return "known_unsupported", job.failure_reason
 
 
