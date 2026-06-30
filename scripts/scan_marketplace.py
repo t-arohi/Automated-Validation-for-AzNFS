@@ -347,6 +347,7 @@ def buckets_by_state(records: list[dict]) -> dict[str, list[dict]]:
                 "version": img.get("version", ""),
                 "publishers": set(),
                 "sku_count": 0,
+                "reasons": set(),
             }
             groups[key] = g
         if img.get("publisher"):
@@ -354,6 +355,10 @@ def buckets_by_state(records: list[dict]) -> dict[str, list[dict]]:
         # Marketplace versions sort lexicographically (zero-padded date-style).
         if img.get("version", "") > g["version"]:
             g["version"] = img["version"]
+        # Collect the distinct verdict reasons -- only meaningful for unsupported.
+        r = (img.get("reason") or "").strip()
+        if state == "known_unsupported" and r:
+            g["reasons"].add(r)
         g["sku_count"] += 1
 
     buckets: dict[str, list[dict]] = {}
@@ -364,6 +369,7 @@ def buckets_by_state(records: list[dict]) -> dict[str, list[dict]]:
                 "version": g["version"],
                 "publishers": sorted(g["publishers"]),
                 "sku_count": g["sku_count"],
+                "reason": "; ".join(sorted(g["reasons"])),
             }
         )
     for st in buckets:
