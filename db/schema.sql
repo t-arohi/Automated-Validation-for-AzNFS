@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS images (
                                       -- empty = never validated. Phase 2 compares the numeric-latest
                                       -- published prod version against this to decide if (re)validation
                                       -- is needed. Compare NUMERICALLY, never as strings.
+    reason        TEXT    NOT NULL DEFAULT '',
+                                      -- Human-readable verdict reason, set by Phase 2/3 when a row is
+                                      -- marked known_unsupported (e.g. "prod repo is missing"). Cleared
+                                      -- (empty) on known_supported. Surfaced in the monthly digest's
+                                      -- known_unsupported table.
     UNIQUE(publisher, image, sku, region, architecture)
 );
 
