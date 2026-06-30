@@ -123,7 +123,16 @@ jobs:
           # --- Paths ---
           DB_PATH: marketplace.db
         run: |
-          python -m src.phase2.run --input output/needs_validation.json --output output/lisa_jobs.json --distros "${{ inputs.distros }}"
+          # Distro allow-list: the manual workflow_dispatch input wins; otherwise
+          # fall back to the PHASE2_DISTROS repo variable so the automatic
+          # workflow_run (cascade from Phase 1) ALSO honours it. Empty = validate
+          # every distro. Use this to validate only the distros that can deploy
+          # without accepting marketplace terms (e.g. while RHEL/SLES plan terms
+          # are pending). Excluded distros are simply not handed to Phase 3, so
+          # they stay 'unknown' in the DB and validate later once enabled.
+          DISTROS="${{ inputs.distros }}"
+          if [ -z "$DISTROS" ]; then DISTROS="${{ vars.PHASE2_DISTROS }}"; fi
+          python -m src.phase2.run --input output/needs_validation.json --output output/lisa_jobs.json --distros "$DISTROS"
 
       # ----------------------------------------------------------------
       # 6. Upload the Phase 3 hand-off (LISA jobs) as an artifact.
