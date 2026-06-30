@@ -135,7 +135,7 @@ class FakeDbMod:
         self.records = records or {}     # identity tuple -> row dict
         self.pending = pending or []     # rows currently pending_publish
 
-    def set_validation_state(self, db_path, identity, state, last_validated_version=None):
+    def set_validation_state(self, db_path, identity, state, last_validated_version=None, reason=None):
         self.calls.append((db_path, identity, state, last_validated_version))
         return self.matched
 
