@@ -30,6 +30,23 @@ PUBLISHERS = [
     "MicrosoftCBLMariner",
 ]
 
+# Offers to skip during the scan. Some Canonical Ubuntu offers are PRIVATE /
+# restricted-audience plans (e.g. the "Pro - Advanced SLA" offers
+# 0001-com-ubuntu-pro-advanced-sla-airdig / -ca / -sk). They appear in the
+# marketplace listing but the subscription is not entitled to deploy them, so
+# Phase 3 fails at provisioning with "Offer ... not found / restricted
+# audience". The same Ubuntu releases are available from PUBLIC offers
+# (0001-com-ubuntu-server-*, ubuntu-24_04-lts, ubuntu-26_04-lts, ...), so
+# dropping the restricted ones keeps full version coverage with deployable
+# images. Matched case-insensitively as substrings of the offer name. Override
+# with EXCLUDED_OFFER_SUBSTRINGS (comma-separated) if needed.
+EXCLUDED_OFFER_SUBSTRINGS: list[str] = [
+    s.strip().lower()
+    for s in os.environ.get("EXCLUDED_OFFER_SUBSTRINGS", "advanced-sla").split(",")
+    if s.strip()
+]
+
+
 # ---------------------------------------------------------------------------
 # Azure credentials  (set via environment; never hardcode)
 # For local dev:   run `az login` and DefaultAzureCredential picks it up.
