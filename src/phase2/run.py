@@ -81,8 +81,10 @@ class Phase1DbAdapter:
         self._db = db_mod
         self._path = db_path
 
-    def set_validation_state(self, identity, state) -> None:
-        updated = self._db.set_validation_state(self._path, identity, state)
+    def set_validation_state(self, identity, state, reason=None) -> None:
+        updated = self._db.set_validation_state(
+            self._path, identity, state, reason=reason
+        )
         if not updated:
             logger.warning("No DB row matched identity %s (state=%s)", identity, state)
 
