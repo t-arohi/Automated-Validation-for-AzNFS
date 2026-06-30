@@ -218,6 +218,25 @@ def rollup_by_distro(images: list[dict]) -> list[dict]:
     return rollup
 
 
+def _exclude_distros(records: list[dict]) -> list[dict]:
+    """Drop records whose distro_label matches config.EXCLUDED_DISTRO_PREFIXES.
+
+    Applied to both the delta hand-off and the EMIT_BACKLOG feed so excluded
+    distros (e.g. EOL CentOS) never reach Phase 2/3, regardless of what the
+    cached DB still holds.
+    """
+    prefixes = config.EXCLUDED_DISTRO_PREFIXES
+    if not prefixes:
+        return records
+    kept = []
+    for r in records:
+        label = (r.get("distro_label") or "").lower()
+        if any(label.startswith(p) for p in prefixes):
+            continue
+        kept.append(r)
+    return kept
+
+
 def dedup_backlog(records: list[dict]) -> list[dict]:
     """Pick one representative SKU per (distro_label, architecture) from a backlog.
 
@@ -459,7 +478,7 @@ def main() -> int:
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
 
     with open(config.OUTPUT_JSON, "w", encoding="utf-8") as fh:
-        json.dump(format_phase2_input(new_images), fh, indent=2)
+        json.dump(format_phase2_input(_exclude_distros(new_images)), fh, indent=2)
 
     # ------------------------------------------------------------------
     # Step 5b ΓÇö Distro-level rollup  (the unit AzNFS validates)
@@ -470,7 +489,7 @@ def main() -> int:
     # drives the new-release diff and the e-mail; it is kept IN MEMORY ONLY ΓÇö
     # needs_validation.json (written above) is the single JSON artifact Phase 1
     # produces (and Phase 2's input).
-    all_records = db_manager.get_all_records(config.DB_PATH)
+    all_records = _exclude_distros(db_manager.get_all_records(config.DB_PATH))
 
     # ------------------------------------------------------------------
     # Step 5a-bis -- One-shot FULL re-validation reset (RESET_VALIDATION)
@@ -501,7 +520,7 @@ def main() -> int:
                 "(kept pending_validation) -- one-shot full re-validation armed.",
                 reset_token, n,
             )
-            all_records = db_manager.get_all_records(config.DB_PATH)
+            all_records = _exclude_distros(db_manager.get_all_records(config.DB_PATH))
 
     unvalidated_records = [
         r for r in all_records if r.get("validated") == "unknown"
