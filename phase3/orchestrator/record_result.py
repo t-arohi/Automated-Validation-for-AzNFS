@@ -261,6 +261,11 @@ def process_job(job: LisaJob) -> Tuple[str, str]:
 
 def run(jobs: List[LisaJob]) -> Dict[str, int]:
     """Record every job's verdict and send ONE summary e-mail. Returns counts."""
+    # Like Phase 1 (silent when no new distro is found), stay silent when there
+    # is nothing to validate: no jobs means no verdicts, so skip the e-mail.
+    if not jobs:
+        logger.info("Phase 3: no jobs to record; skipping summary e-mail.")
+        return {"known_supported": 0, "known_unsupported": 0}
     run_url = _github_run_url()
     supported: List[Dict[str, str]] = []
     unsupported: List[Dict[str, str]] = []
