@@ -99,7 +99,10 @@ def load_entries(path: str) -> list[dict]:
     return data
 
 
-def entries_from_db(db_mod, db_path: str, wanted: set[str]) -> list[dict]:
+def entries_from_db(
+    db_mod, db_path: str, wanted: set[str],
+    exclude_substrings: tuple[str, ...] = (),
+) -> list[dict]:
     """Build Phase 2 entries straight from the DB for selected distro_labels.
 
     A manual Phase 2 run usually depends on Phase 1's ``needs_validation.json``,
@@ -113,10 +116,26 @@ def entries_from_db(db_mod, db_path: str, wanted: set[str]) -> list[dict]:
     distro_label, version, last_validated_version), so they are used as-is and
     bypass the ``enrich_and_merge`` skip filter (this is a deliberate, explicit
     re-validation of the selected distros, regardless of their current state).
+
+    ``exclude_substrings`` drops rows whose OFFER (``image``) or ``sku`` contains
+    any of the substrings (case-insensitive) BEFORE picking the representative.
+    This matters because the newest marketplace ``version`` for a release is
+    often a NON-DEPLOYABLE image: ``advanced-sla`` offers are restricted-audience
+    (the subscription is not entitled) and ``pro`` offers carry a purchase plan
+    (deploy needs marketplace terms the runner identity cannot accept). Excluding
+    them makes the pick fall back to the plan-free plain ``*-server-*`` image,
+    which deploys without terms. Non-Ubuntu offers (Rocky/RHEL/SLES) carry none
+    of these tokens, so they are unaffected.
     """
     rows = db_mod.get_all_records(db_path)
     if wanted:
         rows = [r for r in rows if (r.get("distro_label") or "").casefold() in wanted]
+    if exclude_substrings:
+        subs = tuple(s.casefold() for s in exclude_substrings)
+        def _ok(r: dict) -> bool:
+            hay = f"{r.get('image', '')} {r.get('sku', '')}".casefold()
+            return not any(s in hay for s in subs)
+        rows = [r for r in rows if _ok(r)]
     chosen: dict[tuple[str, str], dict] = {}
     for r in rows:
         key = (r.get("distro_label", ""), r.get("architecture", ""))
@@ -280,10 +299,25 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.from_db:
         # Pull the selected distros straight from the DB (no needs_validation.json).
-        entries = entries_from_db(db_mod, DB_PATH, wanted)
+        # Skip non-deployable / non-standard offers so the representative pick is a
+        # plan-free plain "*-server-*" / "*-base" image that deploys without
+        # marketplace terms:
+        #   advanced-sla -> restricted audience (subscription not entitled)
+        #   pro          -> carries a purchase plan (needs terms the MI can't accept)
+        #   cvm/confidential -> confidential-compute image (needs special VM size)
+        #   minimal      -> stripped image (prefer the full server image)
+        #   fips         -> FIPS image (carries a plan)
+        # Override via FROMDB_EXCLUDE_OFFERS (comma-separated, case-insensitive).
+        excl = tuple(
+            s.strip() for s in os.environ.get(
+                "FROMDB_EXCLUDE_OFFERS",
+                "advanced-sla,pro,cvm,confidential,minimal,fips",
+            ).split(",") if s.strip()
+        )
+        entries = entries_from_db(db_mod, DB_PATH, wanted, exclude_substrings=excl)
         logger.info(
-            "From-DB mode: %d entr(ies) for %s",
-            len(entries), sorted(wanted) if wanted else "ALL distros",
+            "From-DB mode: %d entr(ies) for %s (excluding offers/skus matching %s)",
+            len(entries), sorted(wanted) if wanted else "ALL distros", list(excl),
         )
     else:
         try:
