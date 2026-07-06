@@ -244,6 +244,12 @@ def dedup_backlog(records: list[dict]) -> list[dict]:
     """
     chosen: dict[tuple[str, str], dict] = {}
     for r in records:
+        # Skip restricted offers (e.g. advanced-sla) the subscription cannot
+        # deploy -- mirrors the marketplace-scan filter so a re-armed backlog
+        # never re-emits a non-deployable image.
+        haystack = (r.get("image", "") + " " + r.get("sku", "")).lower()
+        if any(p in haystack for p in config.EXCLUDED_OFFER_SUBSTRINGS):
+            continue
         key = (r.get("distro_label", ""), r.get("architecture", ""))
         cur = chosen.get(key)
         if cur is None or (r.get("version", "") > cur.get("version", "")):
