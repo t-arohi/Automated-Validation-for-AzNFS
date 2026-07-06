@@ -522,11 +522,6 @@ def main() -> int:
         len(distro_rollup), len(unvalidated_records), len(all_records),
     )
 
-    # Render the cut-down distro list (one row per OS release, with SKU counts)
-    # into the GitHub Actions run summary. Shown on EVERY run so the daily scan
-    # always surfaces the full tracked backlog -- not just the new/updated delta
-    # in needs_validation.json. No-op locally (GITHUB_STEP_SUMMARY unset).
-    write_step_summary(distro_rollup, len(all_records))
 
     # ------------------------------------------------------------------
     # Step 5c ΓÇö One-shot backlog feed  (opt-in, temporary: EMIT_BACKLOG)
