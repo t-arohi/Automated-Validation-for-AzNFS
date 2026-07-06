@@ -123,7 +123,7 @@ python scripts/scan_marketplace.py
         |       +-- ACS Email REST           (send notification)
         |
         +-- SQLite (marketplace.db, cached between runs)
-        |       +-- classify each SKU: NEW / UPDATED / UNCHANGED
+        |       +-- classify each SKU: new / updated / unchanged
         |
         +-- output/needs_validation.json    (the single Phase 1 artifact)
 ```
@@ -192,7 +192,7 @@ highlights:
 | `family` | `apt` or `yum` — used by Phase 2 gates. |
 | `distro_label` | Human-readable name, e.g. `Ubuntu 24.04`, `RHEL 9`, `Rocky 9`. |
 | `version` | Latest version observed. Bumped in place on a new release. |
-| `validated` | Lifecycle: `unknown` -> `pending_validation` -> `known_supported` / `known_unsupported` (Phase 2 may park a row at `pending_publish` while it waits for a manual prod publish). **Preserved across version bumps** so manual validation state is not lost. Surfaced in the Phase 1 JSON as `validation_status`. |
+| `validated` | The persisted validation state. Only three values are ever stored: `unknown`, `known_supported`, and `known_unsupported`. (`pending_publish` and `pending_validation` are used only as labels in the summary e-mail — they are never written to the DB; see the Phase 2 section below.) **Preserved across version bumps** so manual validation state is not lost. Surfaced in the Phase 1 JSON as `validation_status`. |
 | `last_validated`, `last_validated_version` | Stamped by Phase 2/3 when a verdict is recorded. |
 | `date_added`, `last_modified`, `last_checked` | All reset to "now" on a version bump. |
 
@@ -201,29 +201,30 @@ monthly-digest marker and the `EMIT_BACKLOG` one-shot token.
 
 ### Classification per scan
 
-Each Marketplace SKU is classified as one of:
+Every Marketplace SKU is compared against what is already in the database and
+handled in one of three ways:
 
-- **NEW** — never seen before. Inserted with `validated='unknown'`.
-- **UPDATED** — same identity tuple, higher version. Version + timestamps
-  refreshed; `family` / `distro_label` re-derived; `validated` preserved.
-- **UNCHANGED** — version matches. Only `last_checked` is bumped.
+- A SKU that has never been seen before is inserted as a new row, with its
+  `validation_status` set to `unknown`.
+- A SKU whose version has moved up is treated as an update: its version and
+  timestamps are refreshed and its `family` / `distro_label` are re-derived,
+  while its existing `validation_status` is preserved.
+- A SKU whose version has not changed simply has its `last_checked` timestamp
+  bumped.
 
-NEW and UPDATED images go into the email and the JSON. UNCHANGED images
-are silently re-stamped.
+Only the new and updated images go into the e-mail and into
+`needs_validation.json`; unchanged images are re-stamped silently.
 
 ## Phase 1 output
 
 `output/needs_validation.json` is the **only** file Phase 1 writes. It is
-**overwritten** every run with the list of NEW + UPDATED images from that scan
-(one row per SKU). Each row is numbered at the **distro-release** level: `id`
-and `no` both run `1..N` over the unique `distro_label` values in the file (the
-SQLite row id is not exposed). The DB `validated` column is surfaced here as
-`validation_status`.
+**overwritten** every run with the list of new or updated images from that scan
+(one row per SKU). Each row carries the image's DB row `id` alongside its tracked
+fields; the DB `validated` column is surfaced here as `validation_status`.
 
 ```json
 {
   "id": 12,
-  "no": 12,
   "publisher": "RedHat",
   "image": "RHEL",
   "sku": "9-lvm-gen2",
@@ -256,8 +257,7 @@ row per OS release, with publishers / architectures / SKU counts collapsed):
 If no new distro releases are found, **no email is sent that day**. Separately,
 once per calendar month — on the first scan of the month — a digest lists every
 tracked distro release grouped into **three buckets by AzNFS validation state**
-(`known_supported` / `known_unsupported` / `unknown`, the last folding in the
-not-yet-decided `pending_*` states):
+(`known_supported` / `known_unsupported` / `unknown`):
 
 - `[AzFilesAutoPackager] Monthly reminder: 8 supported, 3 unsupported, 1 unknown`
 
@@ -275,24 +275,31 @@ Notification failures are caught and logged — they never crash a run.
 
 ## Phase 2 — the three gates and the AzNFS support policy
 
-For each image Phase 2 walks the version-indexed PMC prod layout:
+For each image Phase 2 walks the version-indexed PMC prod layout. Phase 2 only
+ever writes three states to the DB — `unknown`, `known_supported`,
+`known_unsupported`. `pending_publish` and `pending_validation` are not stored;
+they appear only as labels in the summary e-mail.
 
 1. **Gate 1 — repo exists?** `GET /<distro>/<version>/prod/` returns 200. If not,
-   the release is marked `known_unsupported` (reason: *prod repo is missing*).
+   the release is stored `known_unsupported` (reason: *prod repo is missing*).
 2. **Gate 2 — package published?** The aznfs directory lists a tracked `0.3.x`
-   build for this architecture. If not, the **AzNFS support policy** decides:
-   - the distro is **not** in the supported set ⇒ `known_unsupported`
-     (*repo is found but packages are not found because distro is not supported by AzNFS*);
+   build for this architecture. If not, the **AzNFS support policy** decides —
+   the DB row is stored `known_unsupported` in every case, and the e-mail carries
+   the detail:
+   - the distro is **not** in the supported set — e-mail reason
+     *repo is found but packages are not found because distro is not supported by AzNFS*;
    - the distro **is** supported and is listed in
      [`Azure/AZNFS-mount/packages.csv`](https://github.com/Azure/AZNFS-mount/blob/main/packages.csv)
-     ⇒ `pending_publish` (*publish packages manually, then re-invoke Phase 2*);
-   - the distro **is** supported but is **missing** from `packages.csv` ⇒
-     `pending_publish` (*team must update the csv/yaml, push a branch, and
-     re-invoke Phase 2 with that branch*).
+     — the e-mail flags it *pending_publish* (*publish packages manually, then
+     re-invoke Phase 2*);
+   - the distro **is** supported but is **missing** from `packages.csv` — e-mail
+     reason *team must update the csv, push a branch, and re-invoke Phase 2 with
+     that branch*.
 3. **Gate 3 — validation needed?** The latest `0.3.x` prod version is compared
-   (numerically) against what was last validated. Already-validated ⇒
-   `known_supported` (trusted); first time or newer ⇒ a LISA job is emitted and
-   the row is parked `pending_validation`.
+   (numerically) against what Phase 3 last validated. Already-validated ⇒ stored
+   `known_supported` (the e-mail calls it *trusted*); first time or newer ⇒ a
+   LISA job is emitted and the DB row is left `unknown` (the e-mail lists it as
+   handed to Phase 3), so Phase 3 records the final verdict.
 
 The **AzNFS-supported distros** are: Ubuntu 18.04 / 20.04 / 22.04 / 24.04 / 26.04;
 RHEL 7 / 8 / 9 / 10; Rocky 8 / 9; SLES 15 / 16.
@@ -311,7 +318,7 @@ for the full design, the test tiers, and bring-up findings.
 | Code | Meaning |
 |---|---|
 | 0 | Scan completed, nothing new or updated. |
-| 1 | Scan completed, NEW and/or UPDATED images found. **Not a failure** — the workflow treats this as success. |
+| 1 | Scan completed, new and/or updated images found. **Not a failure** — the workflow treats this as success. |
 | >1 | Real error. Workflow fails. |
 
 ## GitHub Actions configuration
