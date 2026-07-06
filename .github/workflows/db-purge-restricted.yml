@@ -1,0 +1,126 @@
+name: DB Purge Restricted Offers (one-off)
+
+# One-off maintenance to remove stale rows whose marketplace offer (image) or
+# SKU matches a restricted substring (default "advanced-sla") from the live
+# marketplace.db.
+#
+# It reuses the EXACT same cache path/keys as scan-marketplace.yml, so it edits
+# the real database and the next scheduled scan picks up the cleaned copy.
+#
+# Safety: dry-run by default. It only DELETEs (and only then saves the DB back
+# to cache) when you tick "apply". Run it once with apply unchecked to see the
+# matching rows, then again with apply checked to remove them.
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+on:
+  workflow_dispatch:
+    inputs:
+      substring:
+        description: "Offer/SKU substring to purge (case-insensitive, matched against image AND sku)"
+        type: string
+        default: "advanced-sla"
+      apply:
+        description: "Actually DELETE the matching rows (unchecked = dry-run / report only)"
+        type: boolean
+        default: false
+
+jobs:
+  purge:
+    runs-on:
+      - self-hosted
+      - azure-vm-marketplace
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Restore the newest existing database cache (same prefix the scan uses).
+      - name: Restore database cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: marketplace.db
+          key: marketplace-db-v2-${{ github.run_id }}
+          restore-keys: |
+            marketplace-db-v2-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Purge or report
+        env:
+          SUBSTR: ${{ inputs.substring }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          python - <<'PY'
+          import os, sqlite3, sys
+
+          db = "marketplace.db"
+          substr = (os.environ.get("SUBSTR") or "advanced-sla").strip().lower()
+          apply = (os.environ.get("APPLY") or "false").strip().lower() == "true"
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          def out(line=""):
+              print(line)
+              if summary_path:
+                  with open(summary_path, "a", encoding="utf-8") as fh:
+                      fh.write(line + "\n")
+
+          if not os.path.exists(db):
+              out("No `marketplace.db` was restored (cache miss) -- nothing to purge.")
+              sys.exit(0)
+
+          con = sqlite3.connect(db)
+          con.row_factory = sqlite3.Row
+          where = "lower(image) LIKE ? OR lower(sku) LIKE ?"
+          pat = "%" + substr + "%"
+
+          rows = con.execute(
+              "SELECT publisher, image, sku, version, validated "
+              "FROM images WHERE " + where,
+              (pat, pat),
+          ).fetchall()
+          n = len(rows)
+
+          out("## DB purge -- substring `" + substr + "`")
+          out()
+          out("- Mode: **" + ("APPLY (delete)" if apply else "DRY RUN (report only)") + "**")
+          out("- Matching rows: **" + str(n) + "**")
+
+          if n:
+              out()
+              out("| publisher | image (offer) | sku | version | validated |")
+              out("|---|---|---|---|---|")
+              for r in rows[:100]:
+                  out("| {} | {} | {} | {} | {} |".format(
+                      r["publisher"], r["image"], r["sku"], r["version"], r["validated"]))
+              if n > 100:
+                  out("| ... | ... | ... | ... | (+{} more) |".format(n - 100))
+
+          if apply and n:
+              con.execute("DELETE FROM images WHERE " + where, (pat, pat))
+              con.commit()
+              con.execute("VACUUM")
+              con.commit()
+              left = con.execute(
+                  "SELECT count(*) FROM images WHERE " + where, (pat, pat)
+              ).fetchone()[0]
+              out()
+              out("- Deleted **" + str(n) + "** row(s); remaining matching: **" + str(left) + "**")
+          elif apply:
+              out()
+              out("- Nothing to delete.")
+          con.close()
+          PY
+
+      # Only persist the DB when we actually deleted something.
+      - name: Save database cache
+        if: ${{ inputs.apply }}
+        uses: actions/cache/save@v4
+        with:
+          path: marketplace.db
+          key: marketplace-db-v2-${{ github.run_id }}
