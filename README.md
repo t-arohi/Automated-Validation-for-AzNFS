@@ -366,6 +366,51 @@ Required runner: a self-hosted runner registered to the repo with labels
 pair). The runner's host VM must have the user-assigned MI attached, and — for
 Phase 3 — the LISA engine (bootstrapped automatically by `phase3/setup_lisa.sh`).
 
+## Logs
+
+The pipeline is not a long-running daemon, so there is no `/var/log/*.log` file:
+it runs as GitHub Actions workflows and every script logs to **stdout** (via
+Python's `logging`), so the Actions run log *is* the log. Each workflow (Scan,
+Phase 2, Phase 3, Chain watchdog) is its own log source.
+
+From the `gh` CLI (run from a clone of this repo):
+
+```bash
+# Find recent runs of a workflow
+gh run list --workflow "Scan Marketplace Images" -L 5
+
+# Full log of one run -- contains every INFO line the scripts emit
+gh run view <run-id> --log
+
+# Only the failed steps -- fastest for troubleshooting
+gh run view <run-id> --log-failed
+
+# Live-follow a run in progress (the `tail -f` equivalent)
+gh run watch <run-id>
+```
+
+Or in the browser: the **Actions** tab -> the workflow -> the run -> the job ->
+expand each step.
+
+Other log sources:
+
+- **Verbosity** — the scripts log at `INFO`; `scan_marketplace.py` honours a
+  `LOG_LEVEL` env var (default `INFO`). Set it to `DEBUG` locally, or add
+  `LOG_LEVEL` to the workflow `env:`, for more detail.
+- **Phase 3 (LISA)** — `run_phase3` prints a `run log path:`; the full LISA logs
+  and `lisa.junit.xml` live under that directory on the runner and are also
+  embedded in the Phase 3 Actions log.
+- **Runner host** — on the self-hosted runner VM, agent diagnostics are under
+  `~/actions-runner/_diag/` and the checked-out workspace under
+  `~/actions-runner/_work/`.
+- **E-mail summaries** are the *push* equivalent of reading logs: Phase 1 new
+  releases + the monthly digest, the Phase 2 and Phase 3 run summaries, and the
+  watchdog's "scan hasn't run in _N_ h" alert.
+
+> Actions run logs follow the repository's retention setting (90 days by
+> default) and are then purged — there is no persistent file. Keep the e-mail
+> summaries, or add an `upload-artifact` step to retain a run's log.
+
 ## Local development
 
 ```bash
