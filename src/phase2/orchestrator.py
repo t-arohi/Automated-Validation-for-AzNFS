@@ -1,4 +1,4 @@
-﻿"""Phase 2 orchestration: validate AzNFS coverage against PMC **prod**.
+"""Phase 2 orchestration: validate AzNFS coverage against PMC **prod**.
 
 Prod-only design (no PMC API, no tux-dev, no ADO build). For each image handed
 over by Phase 1 the orchestrator walks three checks built straight on the public
@@ -254,15 +254,20 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike) -> Phase2Result:
     ident = _identity(entry)
     family = entry.get("family") or ""
     arch = (entry.get("architecture") or entry.get("arch") or "").lower()
+    label = entry.get("distro_label", "")
+    logger.info("[%s] Phase 2 start (family=%s, arch=%s)", label or "?", family or "?", arch or "?")
 
     # Gate 1: prod repo exists?
     g1 = gate1_repo_exists(entry, prod)
     if not g1.passed:
         reason = "prod repo is missing"
+        logger.info("[%s] Gate 1 FAIL (%s: %s) -> known_unsupported",
+                    label or "?", g1.reason, g1.details)
         db.set_validation_state(ident, KNOWN_UNSUPPORTED, reason=reason)
         return Phase2Result("known_unsupported", reason=reason)
 
     distro, version = g1.segment, g1.resolved_version
+    logger.info("[%s] Gate 1 PASS -> prod repo /%s/%s/prod/", label or "?", distro, version)
 
     # Gate 2: is an aznfs package for this arch published in the tracked 0.3.x series?
     want_arch = pmc_packages.normalize_arch(arch, family)
@@ -272,11 +277,15 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike) -> Phase2Result:
         if pmc_packages.file_arch(f, family) == want_arch
         and pmc_packages.in_series(pmc_packages.version_from_filename(f))
     ]
+    logger.info("[%s] Gate 2: %d package file(s) listed, %d match arch=%s in %s.x series",
+                label or "?", len(files), len(arch_files), want_arch, pmc_packages.AZNFS_SERIES)
     if not arch_files:
         label = entry.get("distro_label", "")
         # (a) the distro is outside the AzNFS support matrix -> terminal.
         if not _is_aznfs_supported_distro(label):
             reason = "repo is found but packages are not found because distro is not supported by AzNFS"
+            logger.info("[%s] Gate 2 FAIL: no %s.x package (arch=%s) + distro NOT in support set -> known_unsupported",
+                        label or "?", pmc_packages.AZNFS_SERIES, want_arch)
             db.set_validation_state(ident, KNOWN_UNSUPPORTED, reason=reason)
             return Phase2Result("known_unsupported", reason=reason)
         # (b) supported distro already listed in AZNFS-mount/packages.csv -> the
@@ -289,11 +298,15 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike) -> Phase2Result:
                 "no AzNFS packages found on prod and packages.csv does not "
                 "require modification; publish packages manually and re-invoke Phase 2"
             )
+            logger.info("[%s] Gate 2 FAIL: no package but distro IS in packages.csv -> pending_publish (e-mail flag; DB known_unsupported)",
+                        label or "?")
             db.set_validation_state(ident, KNOWN_UNSUPPORTED, reason=reason)
             return Phase2Result("pending_publish", reason=reason)
         # (c) supported distro MISSING from packages.csv -> needs a csv/code
         # change first; mark known_unsupported until that branch is built.
         reason = "team must update packages.csv + push branch + re-invoke Phase 2 with the new branch"
+        logger.info("[%s] Gate 2 FAIL: no package + distro MISSING from packages.csv -> known_unsupported",
+                    label or "?")
         db.set_validation_state(ident, KNOWN_UNSUPPORTED, reason=reason)
         return Phase2Result("known_unsupported", reason=reason)
 
@@ -306,6 +319,8 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike) -> Phase2Result:
         pmc_packages.version_tuple(p) > pmc_packages.version_tuple(v_last)
     )
     if not needs_validation:
+        logger.info("[%s] Gate 3: prod v%s == last-validated v%s -> known_supported (trusted, no LISA run)",
+                    label or "?", p, v_last)
         db.set_validation_state(ident, KNOWN_SUPPORTED, reason="")
         return Phase2Result("trusted", reason=f"already validated on prod (v{p})")
 
@@ -313,6 +328,8 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike) -> Phase2Result:
     # Emit the LISA job WITHOUT changing validation_state: it stays whatever it
     # was (unknown for a fresh distro). Phase 3 sets known_supported/-unsupported
     # on its verdict. Only 3 states ever persist.
+    logger.info("[%s] Gate 3: prod v%s %s -> emit LISA job (hand off to Phase 3)",
+                label or "?", p, f"> last-validated v{v_last}" if v_last else "(first validation)")
     reason = f"validate v{p}" + (f" (was v{v_last})" if v_last else " (first validation)")
     return Phase2Result("to_phase3", reason=reason, lisa_job=lisa_job)
 
