@@ -3,9 +3,9 @@ name: Verify MI ADO access (one-off)
 # One-off diagnostic: does the runner's managed identity (MIscan) have
 # permission to CREATE work items in the target ADO project/area?
 #
-# It is non-destructive: it only READS work item types and runs a create with
-# `validateOnly=true`, which validates permissions/rules WITHOUT saving any
-# work item. No bug is ever created.
+# By default it is non-destructive: it READS work item types and runs a create
+# with `validateOnly=true` (nothing is saved). Set the `create_real` input to
+# actually file ONE real Bug (for an end-to-end confirmation).
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -25,6 +25,10 @@ on:
         description: 'Area path (use double backslashes, e.g. One\\XStore\\XSMB)'
         type: string
         default: 'One\XStore\XSMB'
+      create_real:
+        description: "Actually CREATE one real Bug (unchecked = validateOnly, nothing saved)"
+        type: boolean
+        default: false
 
 jobs:
   verify:
@@ -47,6 +51,7 @@ jobs:
           ADO_ORG: ${{ inputs.ado_org }}
           ADO_PROJECT: ${{ inputs.ado_project }}
           AREA_PATH: ${{ inputs.area_path }}
+          CREATE_REAL: ${{ inputs.create_real }}
         run: |
           python - <<'PY'
           import os, json, sys
@@ -84,17 +89,27 @@ jobs:
           out(f"- **GET workitemtypes** -> HTTP **{r1.status_code}** " +
               ("(read OK - MI is a project member)" if read_ok else "(read FAILED - MI not authorized to read)"))
 
-          # 2) CREATE permission: POST a Bug with validateOnly=true (NOT saved)
-          u2 = f"https://dev.azure.com/{org}/{proj}/_apis/wit/workitems/$Bug?validateOnly=true&api-version=7.1"
+          # 2) CREATE: validateOnly by default; a REAL bug when create_real=true
+          real = (os.environ.get("CREATE_REAL") or "false").strip().lower() == "true"
+          qs = "" if real else "validateOnly=true&"
+          u2 = f"https://dev.azure.com/{org}/{proj}/_apis/wit/workitems/$Bug?{qs}api-version=7.1"
+          title = ("[Automated Package validation Tool] MI ADO access test (safe to delete)"
+                   if real else "[verify] MI ADO access test (validateOnly - not saved)")
           patch = [
-              {"op": "add", "path": "/fields/System.Title", "value": "[verify] MI ADO access test (validateOnly - not saved)"},
+              {"op": "add", "path": "/fields/System.Title", "value": title},
               {"op": "add", "path": "/fields/System.AreaPath", "value": area},
           ]
           r2 = requests.post(u2, headers={**hdr, "Content-Type": "application/json-patch+json"},
                              data=json.dumps(patch), timeout=30)
           create_ok = r2.status_code in (200, 201)
-          out(f"- **POST create Bug (validateOnly)** -> HTTP **{r2.status_code}** " +
-              ("(CREATE permission OK)" if create_ok else "(CREATE denied / failed)"))
+          mode = "REAL create" if real else "validateOnly"
+          out(f"- **POST create Bug ({mode})** -> HTTP **{r2.status_code}** " +
+              ("(CREATE OK)" if create_ok else "(CREATE denied / failed)"))
+          if create_ok and real:
+              wi = r2.json()
+              wid = wi.get("id")
+              href = (wi.get("_links", {}).get("html", {}) or {}).get("href", "")
+              out(f"- **Created Bug #{wid}** -> {href}")
           if not create_ok:
               out("")
               out("Response body (truncated):")
