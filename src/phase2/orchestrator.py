@@ -310,6 +310,9 @@ def process_entry(entry: dict, prod: ProdLike, db: DbLike) -> Phase2Result:
         db.set_validation_state(ident, KNOWN_UNSUPPORTED, reason=reason)
         return Phase2Result("known_unsupported", reason=reason)
 
+    logger.info("[%s] Gate 2 PASS -> %d %s.x package(s) published for arch=%s",
+                label or "?", len(arch_files), pmc_packages.AZNFS_SERIES, want_arch)
+
     # Gate 3: validation needed? Numeric-latest 0.3.x prod version vs what Phase 3 last validated.
     best = max(arch_files, key=lambda f: pmc_packages.version_tuple(pmc_packages.version_from_filename(f)))
     p = pmc_packages.version_from_filename(best)
