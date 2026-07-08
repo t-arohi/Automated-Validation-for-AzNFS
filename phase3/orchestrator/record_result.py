@@ -261,8 +261,11 @@ def _send_summary(
 def process_job(job: LisaJob) -> Tuple[str, str]:
     """Record one distro's verdict. Returns (validated_state, failure_reason)."""
     if job.lisa_passed:
+        logger.info("[%s] LISA PASSED -> recording known_supported in DB", job.distro_label)
         _record_validation(job.image_key(), "known_supported", reason="")
         return "known_supported", ""
+    logger.info("[%s] LISA FAILED (%s) -> recording known_unsupported in DB",
+                job.distro_label, job.failure_reason or "no reason")
     _record_validation(job.image_key(), "known_unsupported", reason=job.failure_reason)
     return "known_unsupported", job.failure_reason
 
@@ -316,7 +319,10 @@ def load_jobs(path: str) -> List[LisaJob]:
 def main() -> None:
     import argparse
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    logging.basicConfig(
+        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(
         description="Phase 3: record LISA verdicts in the DB + send a summary."
     )
